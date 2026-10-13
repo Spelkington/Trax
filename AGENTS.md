@@ -81,6 +81,10 @@ a release note) marks the layers it touches with these squares, inner to outer, 
 crosses layers. The square always sits next to words or an id; colour never carries the meaning
 alone.
 
+A one-liner (a list item, a release note) starts with its squares. Anything with a body is a
+callout, the way GitHub draws its alerts: a `>` quote whose first line is the squares and a bold
+title, the body below it. A security change or an open hotspot uses GitHub's `> [!CAUTION]`.
+
 | | Layer (scope) | What's in it |
 |---|---|---|
 | 🟨 | Data (`data`) | `Trax.Effect.Data.*` (Postgres, Sqlite, InMemory), migrations, SQL, the run-record tables |
@@ -96,6 +100,28 @@ Trains are the layer everything outside them speaks: Dispatch runs them, Surface
 Machines invoke them, Data records their runs. A scheduling fix is 🟧, not 🟩; a change to what a
 train does is 🟩. Machines are purple rather than red because red and green are the pair most
 often confused, and machines and trains appear together constantly.
+
+### Flow roles
+
+Squares say where a change sits in the code. A second axis says what a thing *does* in a flow,
+using event storming's sticky-note colours as circles, so the shape tells the two apart. Use the
+circles when describing or diagramming a flow (a machine's design, a feature's sequence), and the
+squares when describing a change.
+
+| | Role | In Trax |
+|---|---|---|
+| 🔵 | Command: an actor asks for something | A GraphQL mutation, a train's input, a trigger sent to a machine |
+| 🟠 | Event: something happened (past tense) | A machine transition, a lifecycle or junction event, a broadcast |
+| 🟣 | Policy: whenever this, then that | Machine rules and guards, timers, a decider |
+| 🟡 | Aggregate: the thing whose state the flow changes | A machine instance and its snapshot |
+| 🟢 | Model/View: the shape of what is read | A GraphQL query's result, a dashboard view (schemas, not tables) |
+| 🟤 | Actor: who issues the command | A user, an operator, the host itself (`Actor`) |
+| 💟 | External system | An invoked train on a remote runner, an identity provider, a consumer's service |
+| 🔴 | Hotspot: a problem or open question | Usually attached to a policy; often a 🟥 change once it is fixed |
+
+**What Trax calls a machine "event" is a 🔵 command** in these terms: a request that the machine
+may refuse. The transition it causes is the 🟠 event. Name them that way in an event-storming
+session, or the two vocabularies will cross.
 
 ## Building and testing
 
