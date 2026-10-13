@@ -2,8 +2,8 @@
 // Trax Recovery: watch a train recover from a crash without asking the model again
 //
 // One process: GraphQL API + scheduler + local workers + dashboard, on Postgres.
-// Three scenario trains ask a decider (a stand-in model by default) and then crash on a later step;
-// the topic map runs three signals side by side and crashes one of the branches.
+// The refund train asks a decider (a stand-in model by default) twice and can crash before or after its
+// checkpoint; the topic map runs three signals side by side and crashes one of the branches.
 // The manifest's automatic retry replays the recorded decisions instead of asking again, and every
 // junction, question and track is published live as a junction event.
 //
@@ -22,6 +22,7 @@ using Microsoft.EntityFrameworkCore;
 using Trax.Api.Auth.ApiKey;
 using Trax.Api.Extensions;
 using Trax.Api.GraphQL.Extensions;
+using Trax.Api.GraphQL.PersistedOperations.Extensions;
 using Trax.Core.Decisions;
 using Trax.Dashboard.Extensions;
 using Trax.Effect.Data.Extensions;
@@ -42,6 +43,7 @@ using Trax.Samples.Recovery.Faults;
 using Trax.Samples.Recovery.Index;
 using Trax.Samples.Recovery.Machines;
 using Trax.Samples.Recovery.Model;
+using Trax.Samples.Recovery.Orders;
 using Trax.Samples.Recovery.Records;
 using Trax.Scheduler.Extensions;
 
@@ -56,6 +58,12 @@ var pace = builder.Configuration.GetSection(DemoPace.Section).Get<DemoPace>() ??
 builder.Services.AddSingleton(pace);
 builder.Services.AddSingleton<FaultInjector>();
 builder.Services.AddSingleton<CaseFiles>();
+
+// The food order's restaurant, simulated, and how long a cart waits for its order (30 minutes unless
+// Recovery:CartWait shortens it, as the recording does). Set before AddStateMachines builds the machine.
+builder.Services.AddSingleton<Restaurant>();
+if (builder.Configuration.GetValue<TimeSpan?>("Recovery:CartWait") is { } cartWait)
+    OrderMachine.CartWait = cartWait;
 
 // The topic map's papers and the pairs it writes, in the topic_map schema beside Trax's tables.
 builder.Services.AddDomainDataContext<ITopicMapDbContext, TopicMapDbContext>(options =>
@@ -109,10 +117,40 @@ builder.Services.AddTrax(trax =>
                 )
                 : configured;
         })
-        // Two state machines: one system-owned instance per index partition, which ingests it, and
-        // the topic map wizard each user drives, whose Building state builds the map. Before
-        // AddMediator, which routes their four stateMachine mutations.
-        .AddStateMachines(typeof(TopicMapMachine).Assembly)
+        // Three state machines: one system-owned instance per index partition, which ingests it, the
+        // topic map wizard each user drives, whose Building state builds the map, and a user's food
+        // order, whose Ordered state delivers it. The topic map and the order are marked [TraxMachine], so
+        // each is served as its own typed operations, machines { topicMap { start chooseFields back build
+        // cancelBuild rebuild edit startOver discard get } } and machines { order { start addItem
+        // placeOrder discard get } }, and clients drive them through those only: the generic stateMachine
+        // mutations are not served. Before AddMediator, which routes the trains every machine operation
+        // runs through.
+        .AddStateMachines(
+            o =>
+            {
+                // Every visitor of the demo signs in with the same operator key, so all their topic maps
+                // belong to one user and count against that one user's draft cap (50 by default). Starting
+                // over leaves no draft behind: the page resets a draft a build began (StartOver), which the
+                // server will not discard, and discards an earlier one. A draft a closed browser abandoned
+                // stops counting against the cap after a day of no activity rather than the default 30, so a
+                // demo database that lives for weeks does not fill it. One abandoned before a build is then
+                // deleted; one a build moved is kept as the record of that build (one in Built until its 7-day
+                // review timer moves it to Expired). The cap itself stays on.
+                o.DraftTtl = TimeSpan.FromDays(1);
+                // How often the reconciler sweeps for due timers and ended runs it was not told of. The
+                // defaults suit the demo; a test host that moves a due time into the past behind the
+                // reconciler's back sets this so the sweep finds it within the test's bound.
+                if (
+                    builder.Configuration.GetValue<TimeSpan?>("Recovery:MachineSweepInterval") is
+                    { } sweep
+                )
+                {
+                    o.InvokeOutcomeSweepInterval = sweep;
+                    o.InvokeOutcomeSweepIntervalWhileListening = sweep;
+                }
+            },
+            typeof(TopicMapMachine).Assembly
+        )
         .AddMediator(typeof(DemoDecider).Assembly)
         .AddScheduler(scheduler =>
             scheduler
@@ -159,6 +197,13 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<ISnapshotPrincipal, TraxCallerSnapshotPrincipal>();
 
 // ── GraphQL ─────────────────────────────────────────────────────────────────
+// The host runs only persisted documents, as it would in production: an ad-hoc document is refused on every
+// transport, and so is introspection. The topic map's documents are generated and registered by Trax when the
+// host starts, one per operation, under ids that carry the machine's IR hash; the page's other documents are
+// registered from its persisted-operations.json (PageDocuments). The manifest of the topic map's documents,
+// operations { machineDocuments }, is behind the operations gate. Recovery:RequirePersistedOperations turns
+// the refusal off, for a suite that drives the API with hand-written documents.
+var requirePersisted = builder.Configuration.GetValue("Recovery:RequirePersistedOperations", true);
 builder.Services.AddTraxGraphQL(graphql =>
     graphql
         // operations.junctionRuns, requeueExecution(askAfresh:), triggerManifest(askAfresh:),
@@ -166,7 +211,17 @@ builder.Services.AddTraxGraphQL(graphql =>
         .ExposeOperationQueries()
         .ExposeOperationMutations()
         .GateOperations(roles: RecoveryRoles.Operator)
+        .UsePersistedOperations(persisted =>
+        {
+            persisted
+                .SingleNode()
+                .RequirePersisted(requirePersisted)
+                .LogNonPersistedRequests(!requirePersisted);
+            if (requirePersisted)
+                persisted.DisableIntrospection();
+        })
 );
+builder.Services.AddHostedService<PageDocuments>();
 builder.Services.AddHealthChecks().AddTraxHealthCheck();
 
 // ── Dashboard, Development only ─────────────────────────────────────────────

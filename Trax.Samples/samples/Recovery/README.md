@@ -4,13 +4,14 @@ A live demo of a crashed run retrying without paying for its model's answers twi
 decider (a stand-in model, or [Nimble](#using-nimble) running on your machine) which track to take, and Trax records each answer with a hash of the state
 it was about. A later step crashes, and the manifest's automatic retry reuses the recorded answers
 while that hash still matches, so it takes the same tracks. Every junction, question and track
-reaches the page as it happens, through junction events. A third scenario, the topic map, runs three
+reaches the page as it happens, through junction events. A second scenario, the topic map, runs three
 similarity signals side by side in [parallel branches](#the-topic-map), crashes one, and draws each attempt
 on the train's declared graph. Two state machines run trains too: one system-owned instance per partition of a
 scholarly index ingests it, and each user builds their own topic map through a wizard whose `Building` state runs
-the map's train. See [the state machines](#the-state-machines).
+the map's train, and a food order whose `Ordered` state delivers it is the page's first view. See
+[the state machines](#the-state-machines).
 
-![The Recovery demo: the research run crashes while it writes its report, and the retry replays the model's two answers](screenshot.png)
+![The Recovery demo: the refund crashes while it pays, and the retry replays the model's two answers](screenshot.png)
 
 It proves three Trax features working together: [train decisions](https://traxsharp.net/docs/core/decisions),
 [retries that replay decisions](https://traxsharp.net/docs/scheduler/dead-letters-and-cleanup#retries-replay-decisions)
@@ -48,43 +49,65 @@ Development only. When your Postgres is not on 5432, start the host with
 
 ## Try it
 
-The page has the controls on the left, the train's real C# with the running step highlighted, a console that
-narrates every junction event as it arrives, and a timeline with one lane per attempt, each with the attempt's
-run graph (`operations.runGraph`) under it. The **Progress** pills
-follow the run: **Runs**, **Breaks** when an attempt crashes, **Recovers** when the retry runs.
+The page has two views, both live against the host. Each has the controls on the left, the real C# with the acting
+line lit, and a timeline drawn as a fixed grid under them.
 
-1. Leave **Research**, the first topic and **Crash once** selected and press **Run**. Attempt 1 runs
-   `PlanResearch`, asks the model `Source` and `Depth`, takes the tracks they pick and crashes in `Summarize`
-   while it writes the report. The train stores its checked findings in a checkpoint before `Summarize`, so a
-   few seconds later the manifest's retry resumes there: its lane holds only `Summarize`, its run graph marks
-   every step before the checkpoint **restored**, and neither question is put to the model again. Once it has
-   completed, **Resume from Summarize** calls `resumeExecution(id, from: "Summarize#0")` on the failed attempt,
-   as the dashboard's **Resume from here** does: a `[resume]` lane that writes the report from the same stored
-   findings.
-2. Pick **Refund**, order **A-1001**, and press **Run**. Attempt 1 asks `ApproveRefund` and crashes in
-   `IssuePayment`. While the retry counts down, press **Change the data during the backoff**: it adds an
-   earlier refund to the order, so the retry's state no longer hashes the same. The replay is refused, the
-   model is asked again (**asked afresh: state changed**) and the refund goes to a person (the `Unsure` track)
-   instead of being paid.
-3. Press **Run** on a refund again and, during the countdown, press **Ask afresh**. The retry starts at once and
-   asks the model again (**asked afresh: on purpose**). A research run offers no ask afresh during its backoff:
-   its retry resumes after both questions, so it has none left to ask.
-4. Try orders A-1002 and A-1003. The model is unsure about A-1002 and declines A-1003, so their runs take the
-   review and decline tracks; the step on that track crashes the same way, and the retry reuses the answer and
-   takes the same track.
-5. After a run completes, **Ask afresh** re-queues its last execution with
-   `requeueExecution(id, askAfresh: true)`, as a run of its own: a lane labelled `[requeue]`.
-6. Pick **Topic map**, leave **Crash once** on, and press **Run**. Attempt 1 loads the papers and runs three
-   branches at once: `embedding`, `cocitation` and `authors`. The `cocitation` branch asks the model `SameTopic`
-   and crashes in the step on the track it picks. The run fails naming `Parallel#0/cocitation`, and the join,
-   `CombineSignals`, never runs, so nothing is written. The retry replays the answer and writes the map. The run
-   graph under each lane shows the three branches side by side. The three slices on the picker take the gate's
-   three tracks (`Yes`, `Unsure`, `No`).
+**Food order** (the page opens on it) has a laptop panel, the code of `OrderMachine.cs` (and of
+`DeliverOrderTrain.cs` while the order's run is on its junctions; the file tabs flip them by hand), and a phone that
+follows the order on a socket of its own. Pick a scenario and press **Place order**: the laptop starts an order, adds
+a Margherita (priced by the server) and presses Place order twice under one request id, as a double click sends it.
+
+1. **Order a pizza.** One order, one run of `DeliverOrderTrain` (`SendToRestaurant`, `ChargeCard`, `Cook`,
+   `PickUp`, `Deliver`), and the run's outcome moves the order to `Delivered`. The phone hears every change.
+2. **The restaurant's tablet times out.** The tablet does not answer once, `SendToRestaurant` tries it again inside
+   the same run, and the order is delivered; the `SendToRestaurant` box is marked **attempt 2**.
+3. **The restaurant is closed.** The run fails before `ChargeCard` and the order is `Cancelled`, with nothing
+   charged.
+4. **Left in the cart.** The button reads **Leave it in the cart**: the order is filled and never placed, and the
+   cart's timer clears it on the server. The timer is 30 minutes; to watch it fire, start the host with
+   `Recovery__CartWait=00:00:15 Recovery__MachineSweepInterval=00:00:01` (without the second, the timer fires at the
+   next sweep of the machines, up to a minute after it is due). **Reset** discards an order still in its cart.
+
+**Workflows** has the train's code, a **Model** panel with one card per question (its instructions and options, the
+answer, and whether it was asked or replayed), and one timeline row per attempt, with a box per junction, question,
+track and checkpoint. The **Progress** pills follow the run: **Runs**, **Breaks** when an attempt crashes,
+**Recovers** when the retry runs.
+
+1. Leave **Refund**, order **A-1001** and **Crash once while emailing** selected and press **Run**. Attempt 1 runs
+   `LoadRefundCase`, asks the model `Problem` (`Damaged`, 91% sure), runs `RequestPhotos`, asks `ApproveRefund`
+   (93% yes: the `Yes` track), pays, stores the `RefundOutcome` in a checkpoint (its box reads **saved**) and crashes
+   in `NotifyCustomer`. A few seconds later the manifest's retry starts from the checkpoint: its row marks every box
+   before it **restored** and runs only `NotifyCustomer`. No question is put to the model and nothing is paid twice.
+   **Change the data** and **Ask afresh** are not offered during this backoff: both questions come before the
+   checkpoint.
+2. Pick **Crash once while paying** and press **Run**. Attempt 1 crashes in `IssuePayment`, before the checkpoint.
+   The retry runs the chain from the top and replays both answers (**replayed**), so it takes the same tracks, pays
+   and emails the customer.
+3. Press **Run** again and, while the retry counts down, press **Change the data during the backoff**: it adds an
+   earlier refund to the order. Both questions are about a state that holds the earlier refunds, so neither hashes
+   the same, both replays are refused and the model is asked again (**asked afresh: state changed**). The refund
+   goes to a person (the `Unsure` track, `QueueForReview`) instead of being paid.
+4. Press **Run** again and, during the countdown, press **Ask afresh**. The retry starts at once and asks the model
+   both questions again (**asked afresh: on purpose**).
+5. Try orders A-1002 and A-1003. The model says A-1002 never arrived (`TraceParcel`) and is unsure about paying it,
+   and says A-1003 is unwanted (`CheckReturnWindow`) and declines it, so their runs take the review and decline
+   tracks.
+6. After a run completes, **Ask afresh** re-queues its last execution with `requeueExecution(id, askAfresh: true)`,
+   as a run of its own: a `requeue` row.
+7. **Resume from NotifyCustomer** appears only once a run is dead-lettered (every retry failed) and its latest
+   failed attempt can resume there. It calls `resumeExecution(id, from: "NotifyCustomer#0")`, as the dashboard's
+   **Resume from here** does, and follows the run in a `resume` row. While the run is alive its own retry already
+   resumes from the checkpoint, and a run is resumed to completion once.
+8. Pick **Topic map**, leave **Crash once** on, and press **Run**. Attempt 1 loads the papers and runs three branches
+   at once: `embedding`, `cocitation` and `authors`. The `cocitation` branch asks the model `SameTopic` and crashes
+   in the step on the track it picks. The run fails naming `Parallel#0/cocitation`, and the join, `CombineSignals`,
+   never runs, so nothing is written. The retry replays the answer and writes the map. The three branches' boxes sit
+   side by side in each row. The three slices on the picker take the gate's three tracks (`Yes`, `Unsure`, `No`).
 
 The same over plain GraphQL, with header `X-Api-Key: recovery-operator-key-do-not-use-in-production`:
 
 ```graphql
-mutation { dispatch { startRun(input: { scenario: REFUND, orderId: "A-1001", crashOnce: true }) {
+mutation { dispatch { startRun(input: { scenario: REFUND, orderId: "A-1001", crashOnce: true, crashWhile: PAYING }) {
   output { runId manifestId manifestExternalId } } } }
 
 query { operations { executions(manifestId: 1, order: OLDEST) { items { id trainState failureJunction } } } }
@@ -119,8 +142,8 @@ query { operations { runGraph(metadataId: 42) {
 
 ## The state machines
 
-Both live in `Trax.Samples.Recovery/Machines/` and use `Invokes` and `IMachineInstances`. A state that invokes a train queues one run when it is
-entered, and only that entry receives the run's outcome.
+All three live in `Trax.Samples.Recovery/Machines/` and use `Invokes`; the partitions use `IMachineInstances` too. A
+state that invokes a train queues one run when it is entered, and only that entry receives the run's outcome.
 
 **`source-partition`, one instance per index partition, owned by the system.** The host seeds 18 canned
 OpenAlex and Crossref records, six partitions of three. `discoverPartitions` starts one instance per
@@ -136,7 +159,7 @@ Discovered --Ingest--> Ingesting --done, unsure--> NeedsReview --Approve--> Appr
 An unsure ingest (Crossref, 2025-02) goes to `NeedsReview` through a guarded `OnDone`; the others reach
 `Ingested`. The instance keeps a fingerprint and counts, never rows. Discovery again finds the same instances
 (their ids derive from the key) and queues nothing. A failed ingest is retried by entering `Ingesting` again, a
-new run, never by the scheduler. No user's `stateMachine` mutation reaches a system instance, so the sample's
+new run, never by the scheduler. No user's machine operation reaches a system instance, so the sample's
 operator-only `partitionAction` fires `Retry` and `Approve` through `IMachineInstances.Advance`, as the system:
 
 ```graphql
@@ -157,12 +180,28 @@ the draft on, to `Built` with a pointer to the pairs it wrote (`mapId`), `BuildF
 `Rebuild` enters `Building` again; `Edit` goes back to the years; **Cancel the build** leaves `Building`, which
 cancels the run. Close the tab and come back: the draft is where you left it.
 
+The topic map is marked `[TraxMachine]`, so it is served as its own typed operations and
+nothing else: `mutation { machines { topicMap { start chooseFields back build cancelBuild rebuild edit startOver discard } } }`
+and `query { machines { topicMap { get } } }`. The page creates its draft with `start`, which mints the draft's
+id on the server, and moves it only with the machine's events, each its own mutation taking its own input type;
+it never writes a snapshot. **Start a new map** leaves no draft behind. A draft in `Building`, or one a build's
+outcome put in `Built`, `BuildFailed` or `BuildCancelled`, is the record of that build, so the server refuses to
+discard it (`discard-not-allowed`); from those states, and from `Expired`, the page sends `StartOver`, which resets
+the same draft to the first step with nothing chosen (from `Building` it cancels the run, and from `Built` it cancels
+the review timer). Before a build, the page discards the draft (`discard`) and starts a new one. If the server refuses
+either, the page shows why and stays on the draft. Every visitor signs in with the same operator key, so all the
+page's drafts belong to one user, under one per-user draft cap: the host sets `DraftTtl` to a day so a draft an
+abandoned browser leaves stops counting toward it long before a demo database fills it. One left before a build is
+deleted then; one a build moved is kept as the record of that build (one in `Built` until its review timer moves it
+to `Expired`).
+
 ```
 ChoosingFields --ChooseFields--> ChoosingRange --Build--> Building --done-------> Built
       ▲            ◀──Back──          ▲  ◀──CancelBuild──    │     --failed-----> BuildFailed
       │                               └───────Edit─────────── Built, BuildFailed, BuildCancelled
       │                                                      └──── --cancelled--> BuildCancelled
                           Building ◀──Rebuild── Built, BuildFailed, BuildCancelled
+ChoosingFields ◀──StartOver── Building, Built, BuildFailed, BuildCancelled, Expired
 ```
 
 The page's twin of the machine (`Trax.Samples.Recovery.Client/src/topicMap/`) is generated by the `trax machine`
@@ -176,12 +215,60 @@ dotnet run --project Trax.Cli/src/Trax.Cli -- machine generate \
   --machine Trax.Samples.Recovery.Machines.TopicMapMachine \
   --ir-out Trax.Samples/samples/Recovery/Trax.Samples.Recovery.Client/src/topicMap \
   --twin-out Trax.Samples/samples/Recovery/Trax.Samples.Recovery.Client/src/topicMap \
+  --corpus-out Trax.Samples/samples/Recovery/Trax.Samples.Recovery.Client/src/topicMap \
   --engine-src Trax.Api.StateMachine/src --import-style specifier
 ```
 
-A client cannot forge a build: an autosave into `Built` and a hand-fired `Building.done` are both refused. A run a
+The host runs only persisted documents, as a production host would: an ad-hoc document, and introspection, are
+refused on every transport. Trax generates the topic map's documents from the schema and registers them when the
+host starts, one per operation, under ids that carry the machine's IR hash
+(`trax_machine_topic-map_<operation>_<hash>`); the page sends each by the id `src/topicMap/topic-map.documents.json`
+lists, with its values as variables. That file is the host's manifest (`operations { machineDocuments }`, operator
+only) for the machine, written by a test from the host the E2E suite starts. After regenerating the twin, write it
+again from `tests/Trax.Samples.Recovery.E2E`:
+
+```bash
+TRAX_UPDATE_MACHINE_DOCUMENTS=1 dotnet test --filter TopicMapDocumentsTests
+```
+
+The food order's operations are among the page's own documents: the page sends `machines { order { start addItem
+placeOrder discard } }` and `machineChanged` for the order by the ids in `src/persisted-operations.json`.
+
+A page built before a deploy that changed the machine sends ids the host no longer serves: the host answers
+`client-outdated`, and the page stops and asks to be reloaded. The page's other documents (the runs it starts and
+reads) are in `src/persisted-operations.json`, which the host registers when it starts (`PageDocuments`) and the page
+sends by id; to change one, edit it there and bump the version at the end of its id. `Recovery:RequirePersistedOperations`
+set to `false` accepts ad-hoc documents again, which only the E2E suite's hand-written requests need.
+
+A client cannot write a build's result: a save of a topic map is refused (`save-not-allowed`), and so is a hand-fired
+`Building.done` (`outcome-bound`). A run a
 machine invoked has no manifest, so when the host running a build dies, "recovers" means the next host to start
 fails the orphaned run, the draft moves to `BuildFailed`, and **Rebuild** works from there.
+
+A built map is held for review for seven days (`TopicMapMachine.ReviewWindow`). Then the server fires `Built`'s
+timer (`Built.after`) and moves the draft to `Expired`, from which it can be rebuilt or edited; the page hears the move
+by push. The timer has no client operation, and an advance that names it is refused (`timer-bound`). The page shows
+the review deadline from the `dueAt` the server pushes beside the Built snapshot; it never fires the timer itself.
+
+**`order`, a food order each user places.** The page's **Food order** view drives it live, and traxsharp.net plays
+a recording of it (`scripts/recordings/order.mjs`). `addItem` puts an item from the menu in the cart, priced by the server; `placeOrder`
+enters `Ordered`, which runs `DeliverOrderTrain` (`SendToRestaurant`, `ChargeCard`, `Cook`, `PickUp`, `Deliver`), and
+the run's outcome ends the order. A cart nobody orders is cleared by the server after 30 minutes
+(`OrderMachine.CartWait`; `Recovery:CartWait` shortens it). Pressing **Place order** twice under one request id is
+answered once, and a second request is `no-transition` from `Ordered`: one order, one run, one charge.
+
+```
+Cart --PlaceOrder--> Ordered --done-----------------> Delivered
+  │                          --failed or cancelled--> Cancelled
+  └──after 30 minutes──> Cleared
+```
+
+`dispatch { orderTrouble(input: { trouble: TABLET_TIMES_OUT }) }` arms trouble for the next order placed, as
+**Crash once** does for a run: the restaurant's tablet does not answer once, or (`RESTAURANT_CLOSED`) the restaurant
+is closed. The scheduler never retries a run a machine invoked, and a failed run would be the order's `Cancelled`, so
+the tablet is tried again inside `SendToRestaurant`: the machine sees one run that recovered, and
+`discover { orders { tabletCalls } }` lists both attempts. A closed restaurant fails the run at `SendToRestaurant`,
+before `ChargeCard`, and the order is `Cancelled` with nothing charged.
 
 ## Keys
 
@@ -191,7 +278,7 @@ start anywhere else):
 | Key | Role | Sees |
 |---|---|---|
 | `recovery-operator-key-do-not-use-in-production` | `Operator` | The operations view: every answer and every step name. The page uses it. |
-| `recovery-viewer-key-do-not-use-in-production` | `Viewer` | The broadcast view of the research and refund trains: the run's shape, with answers and the steps on a track withheld. |
+| `recovery-viewer-key-do-not-use-in-production` | `Viewer` | The broadcast view of the refund train: the run's shape, with answers and the steps on a track withheld. |
 
 ## Demo-only settings
 
@@ -200,10 +287,10 @@ is visible within seconds, and records two runs of its own each second; `AddMeta
 those after ten minutes and keeps the scenario runs. `appsettings.Development.json` holds a fixed state hash key. Neither
 belongs in production: keep the scheduler defaults, and keep the key with your other secrets.
 
-Case files and armed crashes live in memory; the machines' drafts and instances, and the seeded data, are in
+Case files, armed crashes and the restaurant's tablet calls live in memory; the machines' drafts and instances, and the seeded data, are in
 Postgres. A run started before the host restarts has lost its
-case file, so every retry that reads it again fails and the manifest dead-letters (a research run that
-reached its checkpoint does not read it again). A re-queue would fail the same way,
+case file, so every retry that reads it again fails and the manifest dead-letters (a refund that crashed
+while emailing resumes after its checkpoint and does not read it again). A re-queue would fail the same way,
 so the page offers no re-run once a run is dead.
 
 ## Using Nimble
@@ -245,9 +332,7 @@ python3.12 -m venv .venv-mlx
 server then answers one request at a time, about a second a question on an M3 Pro, and logs each answer.
 Nothing leaves the machine.
 
-A real model reads the case, so its answers differ from the demo decider's. Nimble paid A-1001 (0.99), and
-after **Change the data during the backoff** added an earlier refund it was asked again and declined (0.13)
-where the demo decider sends the refund to review. Its latest release ships no fitted probability
+A real model reads the case, so its answers can differ from the demo decider's. Its latest release ships no fitted probability
 temperature, so it is served at 1.0; the gate's bars (pay at 0.8 or above, decline below 0.3) were chosen for
 the demo decider, not checked against Nimble.
 
