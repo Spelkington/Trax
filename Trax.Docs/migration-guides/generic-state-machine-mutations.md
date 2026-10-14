@@ -1,12 +1,15 @@
 ---
-layout: default
-title: Generic State-Machine Mutations
-description: The generic stateMachine mutations are now opt-in. What stops working on upgrade, how to move to each machine's typed API, and what opting back in requires.
-parent: Reference
-nav_order: 21
+title: Move off the generic state-machine mutations
+description: "The generic stateMachine mutations are now opt-in: what stops working on upgrade, how to move to each machine's typed API, and what opting back in requires."
+type: how-to
+area: upgrading
+parent: Upgrading
+nav_order: 1
 ---
 
-# Generic State-Machine Mutations
+# Move off the generic state-machine mutations
+
+Applies from: the first release after Trax 1.62.0 (not yet released on 2026-10-13).
 
 The generic `stateMachine` mutations are no longer served by default. Each machine a host names is served as its own
 typed API instead, under the [machines root](/docs/sdk-reference/graphql-api/machines). The decision is
@@ -38,7 +41,7 @@ machine the host registers, whether `AddStateMachines` found it in a scanned ass
 subclass. A subclass has its base's id, so a host that also registers the base (by scanning the library's assembly,
 or through a registration of the library's) refuses to start, naming both. A sealed machine cannot be served this way.
 
-```csharp
+```csharp fragment
 [TraxMachine]
 public sealed class TopicMapMachine : Machine<TopicMapState, TopicMapTrigger> { ... }
 
@@ -56,7 +59,7 @@ built from delegates, or one that declares `SystemOwned()`, refuses startup when
 Exposing a machine requires [persisted operations](/docs/sdk-reference/persisted-operations/use-persisted-operations).
 The host generates and registers each exposed machine's documents itself, so there is nothing to upload:
 
-```csharp
+```csharp fragment
 builder.Services.AddTraxGraphQL(graphql =>
     graphql.UsePersistedOperations(persisted => persisted.SingleNode()));
 ```
@@ -81,7 +84,7 @@ exception, until it does:
 register. There is no machine-level default: an event added later without a rule stops the host from starting rather
 than inheriting one.
 
-```csharp
+```csharp fragment
 m.Id("topic-map")
     .Version(1)
     .StartsAt(TopicMapState.ChoosingFields, () => new JsonObject())
@@ -96,7 +99,7 @@ m.In(TopicMapState.ChoosingRange)
 ```
 
 The rules are checked below the resolver, where every surface meets, so the same rule holds for host code acting for
-a client. The [authoring page](/docs/sdk-reference/statemachine-api/add-trax-state-machines) lists every startup check.
+a client. The [authoring page](/docs/sdk-reference/statemachine-api/add-state-machines) lists every startup check.
 
 Whatever the `discard` rule, an instance in a state only the server puts it in (a committed state, an effect's
 target, a state that invokes a train, an invoked train's outcome target, or the target of an event gated by
@@ -128,15 +131,15 @@ that changes the context a declared event with an input record, and let the serv
 In TypeScript, `createMachineExecutor(endpoint, { machines })` drives the typed API through the same
 `createSnapshotClient`, `createDraftSession` and `startDraft` as before, and `createMachineServer` with
 `useServerMachine` drives one instance from React, with the server applying every transition and pushing each
-change. Both are described under [The TypeScript client](/docs/sdk-reference/graphql-api/machines#the-typescript-client)
-and [Driving an instance from React](/docs/sdk-reference/graphql-api/machines#driving-an-instance-from-react).
+change. Both are described under [The TypeScript client](/docs/statemachine/call-a-machine-from-typescript)
+and [Driving an instance from React](/docs/statemachine/drive-a-machine-instance-from-react).
 
 ## Opting back in
 
 A host that cannot move yet serves the generic mutations again with `ExposeGenericStateMachineMutations`, which takes
 the name of an authorization policy every caller of the six mutations must satisfy:
 
-```csharp
+```csharp fragment
 builder.Services.AddAuthorization(o =>
     o.AddPolicy("StateMachineClients", p => p.RequireAuthenticatedUser()));
 
@@ -165,7 +168,7 @@ The opt-in and exposed machines can be combined, for instance while a client mov
 ## Defaults an upgraded host gets
 
 These apply to every host that calls `AddStateMachines`, whichever surface serves its machines. Set each on
-`StateMachineOptions` to change it (see [AddStateMachines](/docs/sdk-reference/statemachine-api/add-trax-state-machines#options)):
+`StateMachineOptions` to change it (see [AddStateMachines](/docs/sdk-reference/statemachine-api/add-state-machines#options)):
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -176,13 +179,13 @@ These apply to every host that calls `AddStateMachines`, whichever surface serve
 
 The upgrade also applies migrations `076` to `080` (SQLite `038` to `040`), which add the revision, the start
 request id and request ring, the change notices, the timers' due time and the switch that turns the notices off.
-Each is described, with what a rolling deploy sees, in [Database migrations](/docs/migration-guides/database-migrations#state-machine-revision-076-sqlite-038).
+Each is described, with what a rolling deploy sees, in [Schema migrations](/docs/reference/schema-migrations#state-machine-revision-076-sqlite-038).
 
 ## Related
 
 - [Machines root](/docs/sdk-reference/graphql-api/machines): the typed API, its answers, the TypeScript client and the
   persisted documents.
-- [AddStateMachines](/docs/sdk-reference/statemachine-api/add-trax-state-machines): the options and the startup
+- [AddStateMachines](/docs/sdk-reference/statemachine-api/add-state-machines): the options and the startup
   checks.
 - [Result codes](/docs/sdk-reference/statemachine-api/result-codes): `forbidden`, `save-not-allowed`,
   `request-id-reused` and the rest.

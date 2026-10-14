@@ -1,14 +1,16 @@
 ---
-layout: default
 title: Metadata
 description: "The Metadata record every train run produces: its TrainState lifecycle, failure fields, host tracking, nested trains and the execution flow that fills it."
-parent: Effect
+type: reference
+area: effects
 nav_order: 1
+source:
+  - Trax.Effect/src/Trax.Effect/Models/Metadata/Metadata.cs
 ---
 
 # Metadata
 
-Every train execution produces a metadata record. It captures everything about the run: when it started, what junctions it passed through, what it was carrying, and whether it completed or failed.
+Every run of a `ServiceTrain` produces a metadata row (`trax.metadata`): when it started and ended, what it carried, where it ran, and whether it completed, failed or was cancelled.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -25,10 +27,11 @@ Every train execution produces a metadata record. It captures everything about t
 | `FailureException` | `string?` | Exception type |
 | `FailureReason` | `string?` | Error message |
 | `StackTrace` | `string?` | Stack trace if failed |
-| `FailureClass` | `FailureClass` | `Unclassified` / `Transient` / `Conflict` / `Permanent`, from the registered [failure classifier](/docs/core/trains-and-junctions#classifying-failures). `Unclassified` when the run did not fail or nothing classified it |
+| `FailureClass` | `FailureClass` | `Unclassified` / `Transient` / `Conflict` / `Permanent`, from the registered [failure classifier](/docs/effect/failure-classification). `Unclassified` when the run did not fail or nothing classified it |
 | `ParentId` | `long?` | The parent run's metadata id. Nothing in Trax sets it at present, so it is null for every run, including a train dispatched from a junction; see [Nested Trains](#nested-trains) |
+| `IsChild` | `bool` | True when `ParentId` has a value. Computed, not stored |
 | `ManifestId` | `long?` | Links to manifest for scheduled trains |
-| `ReplayDecisionsOf` | `long?` | The run whose recorded [decisions](/docs/effect/decisions#re-queued-and-retried-runs-replay-their-decisions) this run replays, following that run's own link back for questions it never reached. Set by a re-queue, and by a manifest's retry or dead-letter requeue when the scheduler's checks allow it ([Retries replay decisions](/docs/scheduler/dead-letters-and-cleanup#retries-replay-decisions)); null for a run that asks its deciders afresh. Not a foreign key: a run whose chain names a run that no longer exists, belongs to another train, or ran without recording its decisions fails before its first junction, `Permanent`, rather than asking afresh, unless it is a manifest's run, which asks afresh and is marked `ReplayAbandoned` |
+| `ReplayDecisionsOf` | `long?` | The run whose recorded [decisions](/docs/effect/decisions#re-queued-and-retried-runs-replay-their-decisions) this run replays, following that run's own link back for questions it never reached. Set by a re-queue, and by a manifest's retry or dead-letter requeue when the scheduler's checks allow it ([Retries replay decisions](/docs/scheduler/how-retries-work#retries-replay-decisions)); null for a run that asks its deciders afresh. Not a foreign key: a run whose chain names a run that no longer exists, belongs to another train, or ran without recording its decisions fails before its first junction, `Permanent`, rather than asking afresh, unless it is a manifest's run, which asks afresh and is marked `ReplayAbandoned` |
 | `DecisionsRecorded` | `bool` | True when the run started on a host that records decisions (`AddDecisionRecording`), set on its first write, so a replay can tell a run that reached no questions from one whose decisions were never recorded |
 | `ReplayAbandoned` | `bool` | True when the run named a run to replay in `ReplayDecisionsOf` and asked its deciders afresh instead, because the replay could not be honoured (the host does not record decisions, or the chain is broken). Only a manifest's run does that; any other run fails. `ReplayDecisionsOf` is kept as the record of what the run was queued to do, and a later replay of this run stops here: it replays this run's own answers, or fails, as for a run that did not record its decisions, when there are none |
 | `ResumeFrom` | `long?` | The run this run [resumed](/docs/sdk-reference/train-methods/checkpoint) from a checkpoint of, copied from its work queue entry; null for a run that started from the top. Not a foreign key: the run checks it before trusting any checkpoint, and the metadata cleanup keeps a run while something resumes it |
@@ -46,6 +49,13 @@ Every train execution produces a metadata record. It captures everything about t
 | `HostLabels` | `string?` | User-provided labels as JSON (region, service, team) |
 
 The `TrainState` tracks the lifecycle: `Pending` -> `InProgress` -> `Completed`, `Failed`, or `Cancelled`. If a train fails, the metadata record captures the exception, stack trace, and which junction it happened at.
+
+### Infrastructure members
+
+| Member | Description |
+|--------|-------------|
+| `SetInputObject(value)`, `SetOutputObject(value)` | Hold the run's deserialized input and output in memory. Not stored; methods rather than properties, so log serializers skip them |
+| `AssemblyExtensions.GetAssemblyProject(assembly)` | The assembly's simple name. `Executor` is the entry assembly's |
 
 ### Failure Fields
 
@@ -65,14 +75,12 @@ The original exception is rethrown to callers with its type, message, and stack 
 
 ## Host Tracking
 
-In distributed environments (Lambda, ECS, multiple servers), every metadata record captures where the train actually executed. Host information is auto-detected at startup and stamped on each execution. See [Host Tracking](/docs/effect/host-tracking) for details on auto-detection, custom labels, and the builder API.
+`HostName`, `HostEnvironment`, `HostInstanceId` and `HostLabels` are detected at startup and stamped on each run. [Host tracking](/docs/effect/host-tracking) covers detection, labels and the builder calls.
 
 ## Nested Trains
 
-A junction can dispatch another train mid-execution by injecting `ITrainBus`. The child gets a metadata record of its own, but it is not linked to the parent's: its `ParentId` is not set, and passing the parent's `Metadata` to `RunAsync` throws rather than linking them. The column, the API's `childCount` and `executionChildren`, and the cleanup that clears a deleted parent's children all exist, but no Trax code path writes a parent link today.
-
-See [Mediator: Nested Trains](/docs/mediator#nested-trains) for how to dispatch a child train.
+A train dispatched from a junction gets a row of its own, not linked to the parent's: `ParentId` is not set. [Nested trains](/docs/mediator#nested-trains) covers dispatching one.
 
 ## Execution Flow
 
-For a diagram of the full ServiceTrain lifecycle, from client request through metadata initialization to SaveChanges, see [Effect Architecture](/docs/effect/architecture#execution-flow).
+[Effect architecture](/docs/effect/architecture#execution-flow) has a diagram of a run, from the request through the row's creation to `SaveChanges`.

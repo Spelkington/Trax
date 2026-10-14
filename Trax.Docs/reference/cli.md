@@ -1,9 +1,15 @@
 ---
-layout: default
-title: CLI
-description: "The trax CLI, which scaffolds a hub project and a trains library from a GraphQL SDL file or OpenAPI spec: installation, options, mapping and output."
-parent: Reference
-nav_order: 5
+title: Trax CLI
+description: "The trax CLI: generate scaffolds a hub and a trains library from GraphQL SDL or OpenAPI, and machine scaffolds and exports state machines."
+type: reference
+area: tooling
+nav_order: 1
+source:
+  - Trax.Cli/src/Trax.Cli/Commands/GenerateCommand.cs
+  - Trax.Cli/src/Trax.Cli/Generator
+  - Trax.Cli/src/Trax.Cli/Schema
+  - Trax.Cli/src/Trax.Cli/Commands/MachineCommand.cs
+  - Trax.Cli/src/Trax.Cli/Machines
 ---
 
 # Trax CLI
@@ -111,7 +117,7 @@ Descriptions and OpenAPI paths are copied as text, never refused. Each one is co
 single line, and escaped for where it lands: XML markup is escaped in `///` comments, and
 backslashes and quotes are escaped in the `Description = "..."` string of the train attribute.
 
-`trax machine new` holds its arguments to the same rule: the machine name must make a
+[`trax machine new`](#trax-machine-new-name) holds its arguments to the same rule: the machine name must make a
 PascalCase identifier and `--namespace` must be a dotted one.
 
 ## Schema-to-Train Mapping
@@ -217,6 +223,7 @@ This structure separates infrastructure from domain logic. The trains library ca
 | `Float` | `double` |
 | `Boolean` | `bool` |
 | `DateTime` | `DateTime` |
+| `Date` | `DateOnly` |
 | `Long`, `BigInt` | `long` |
 | `Decimal` | `decimal` |
 | `[T]` | `List<T>` |
@@ -265,17 +272,21 @@ Five names are the exception, because the mappings above write them for the fram
 A schema type or enum with one of those names is refused with the other names the generator cannot
 emit; rename it in the schema.
 
-## After Generating
+## Output
 
-1. `cd` into the hub project directory (`MyProject/MyProject.Hub`)
-2. Run `dotnet restore`
-3. Search for `TODO` in the junction files under `MyProject.Trains/` and implement your business logic
-4. Run `dotnet run`. The hub uses the in-memory data provider, so no database is needed; switch
-   it to Postgres as described in [Project Templates](/docs/reference/templates#switching-to-postgres)
-   when you need data to outlive the process
-5. Open `http://localhost:5400/trax/graphql` for the GraphQL IDE, and `http://localhost:5400/trax`
-   for the dashboard (Development only). Every GraphQL operation needs the header
-   `X-Api-Key: demo-key-do-not-use-in-production`
+On success `generate` prints the two project folders and these next steps, and exits 0:
+
+1. `cd` into the hub project directory (`MyProject/MyProject.Hub`).
+2. `dotnet restore`.
+3. Fill in the junctions under `MyProject.Trains/`: each throws `NotImplementedException` beside a
+   `TODO`.
+4. `dotnet run`.
+
+The hub keeps the template's in-memory data provider, so it runs with no database
+([Switch a template to Postgres](/docs/reference/switch-a-template-to-postgres) moves it), and the
+template's URLs: `http://localhost:5400/trax/graphql` for the GraphQL IDE and
+`http://localhost:5400/trax` for the dashboard (Development only). Every GraphQL operation needs the
+header `X-Api-Key: demo-key-do-not-use-in-production`.
 
 ## State machines (`trax machine`)
 
@@ -406,4 +417,4 @@ that never happened.
 
 ## SDK Reference
 
-> [ExportIr](/docs/sdk-reference/statemachine-api/fluent-authoring#exporting-the-ir) | [IR format](/docs/sdk-reference/statemachine-api/ir-format)
+> [ExportIr](/docs/sdk-reference/statemachine-api/machine#exporting-the-ir) | [IR format](/docs/sdk-reference/statemachine-api/ir-format)

@@ -50,6 +50,7 @@ namespace Trax.Api.GraphQL.Extensions;
 /// Registers and maps the Trax GraphQL API. Call <c>AddTraxGraphQL</c> on the service collection
 /// after <c>AddTrax(...)</c>, then <c>UseTraxGraphQL</c> on the application to map the endpoint.
 /// </summary>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/graphql-api/add-trax-graphql">SDK reference</seealso>
 public static class GraphQLServiceExtensions
 {
     private const string SchemaName = "trax";
@@ -606,7 +607,7 @@ public static class GraphQLServiceExtensions
     /// Maps the Trax GraphQL endpoint at the specified route prefix.
     /// Uses a named schema so it coexists with other HotChocolate schemas
     /// in the same application. Use the optional <paramref name="configure"/> callback
-    /// to apply endpoint conventions such as authorization or rate limiting.
+    /// to apply endpoint conventions such as rate limiting.
     /// </summary>
     /// <remarks>
     /// The schema download (<c>?sdl</c>, <c>/schema</c>, <c>/schema.graphql</c>) and the GraphQL IDE
@@ -618,11 +619,18 @@ public static class GraphQLServiceExtensions
     /// <c>403</c> otherwise. The allowed origins are set with
     /// <c>TraxGraphQLBuilder.AllowSocketOrigins(...)</c>, and default to the host's CORS default
     /// policy. An upgrade with no <c>Origin</c> header is accepted.
+    /// <para>
+    /// Gate the whole endpoint with <c>TraxGraphQLBuilder.RequireAuthorization(policy)</c> on
+    /// <c>AddTraxGraphQL</c>, not with a <c>RequireAuthorization</c> convention here: a convention
+    /// is enforced, but the startup exposure checks count only the builder's gate.
+    /// </para>
     /// </remarks>
     /// <example>
     /// <code>
+    /// builder.Services.AddTraxGraphQL(graphql => graphql.RequireAuthorization("AdminPolicy"));
+    ///
     /// app.UseTraxGraphQL(configure: endpoint => endpoint
-    ///     .RequireAuthorization("AdminPolicy"));
+    ///     .RequireRateLimiting("graphql"));
     /// </code>
     /// </example>
     public static WebApplication UseTraxGraphQL(

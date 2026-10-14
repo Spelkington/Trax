@@ -16,7 +16,7 @@ public sealed record SnippetUnit(string Page, string Group, IReadOnlyList<Fence>
     public static IEnumerable<SnippetUnit> InDocs() =>
         Infrastructure
             .Fences.InDocs()
-            .Where(f => f.IsMarked && f.IsCSharp)
+            .Where(f => f.IsCompiled && f.IsCSharp)
             .SelectMany(f => f.Groups.Select(g => (Fence: f, Group: g)))
             .GroupBy(x => (x.Fence.Page, x.Group))
             .OrderBy(g => g.Key.Page, StringComparer.Ordinal)
@@ -36,18 +36,24 @@ public sealed record SnippetUnit(string Page, string Group, IReadOnlyList<Fence>
 /// <c>#line</c> directive maps it back to the page so a diagnostic names the page and the line on
 /// it. The compilation sees the implicit usings of a <c>Microsoft.NET.Sdk.Web</c> project with
 /// <c>ImplicitUsings</c> on, nullable reference types on, and the assemblies this test project
-/// references: the published Trax packages it pins and the framework. Trax's own namespaces are
+/// references: the Trax projects of the same checkout and the framework. Trax's own namespaces are
 /// not implied, so a snippet shows its <c>using</c> lines.
 /// </para>
 /// <para>
 /// A file holding top-level statements makes the unit an executable, as <c>Program.cs</c> does;
 /// otherwise it is a library. Warnings fail the snippet as errors do, because a reader who copies
-/// it into a project built with warnings as errors gets the same failure.
+/// it into a project built with warnings as errors gets the same failure. CS1701 and CS1702 are
+/// the exception: MSBuild suppresses them in every C# project, so they are suppressed here too.
 /// </para>
 /// <para>
-/// A page whose snippets lean on types the page only implies (an <c>IOrderTrain</c> the example
-/// assumes exists) can declare them in <c>Context/&lt;page path&gt;.cs</c> in this project. That
-/// file joins every compilation from the page, and the reader never sees it.
+/// Context files in this project join a page's compilations, and the reader never sees them.
+/// They layer: <c>Context/_shared.cs</c> declares the host variables any snippet may assume
+/// (<c>builder</c>, <c>services</c>, <c>app</c>, <c>connectionString</c>, ...) and joins every
+/// page; <c>Context/&lt;dir&gt;/_section.cs</c> joins every page under that directory, at any
+/// depth; <c>Context/&lt;page path&gt;.cs</c> declares the types one page only implies (an
+/// <c>IOrderTrain</c> the example assumes exists). A page whose front matter says
+/// <c>snippet_context: none</c> gets its own file only, so it compiles as a reader's empty
+/// project would.
 /// </para>
 /// </summary>
 public static class SnippetCompiler
@@ -89,17 +95,79 @@ public static class SnippetCompiler
         "testhost",
     ];
 
+    /// <summary>
+    /// The warnings every C# project built by MSBuild suppresses by default (<c>NoWarn</c> is
+    /// <c>1701;1702</c> in <c>Microsoft.CSharp.Core.targets</c>): an assembly referencing an older
+    /// version of an assembly than the one referenced here. A reader's project unifies the versions
+    /// and never sees them, so a snippet should not either.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, ReportDiagnostic> MSBuildNoWarn =
+        new Dictionary<string, ReportDiagnostic>
+        {
+            ["CS1701"] = ReportDiagnostic.Suppress,
+            ["CS1702"] = ReportDiagnostic.Suppress,
+        };
+
     private static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.Latest);
 
     private static readonly Lazy<IReadOnlyList<MetadataReference>> References = new(LoadReferences);
 
+    /// <summary>The context file every page's compilations get, unless the page opts out.</summary>
+    public const string SharedFile = "_shared.cs";
+
+    /// <summary>The context file every page under its directory gets, at any depth.</summary>
+    public const string SectionFile = "_section.cs";
+
+    private static readonly Regex NoSnippetContext = new(
+        @"\A---\n(?:(?!---\n).*\n)*?snippet_context:[ \t]*none[ \t]*\n(?:.*\n)*?---(?:\n|\z)",
+        RegexOptions.Compiled
+    );
+
+    /// <summary>The folder holding the context files, mirroring the docs tree.</summary>
+    public static string ContextRoot =>
+        RepoRoot.Combine("tests", "Trax.Docs.Snippets.Tests", "Context");
+
     public static string ContextFileFor(string page) =>
-        RepoRoot.Combine(
-            "tests",
-            "Trax.Docs.Snippets.Tests",
-            "Context",
-            Path.ChangeExtension(page, ".cs")
-        );
+        Path.Combine(ContextRoot, Path.ChangeExtension(page, ".cs"));
+
+    /// <summary>
+    /// The context files that exist for <paramref name="page"/>, widest first: the shared file,
+    /// each enclosing directory's section file from the top down, then the page's own file.
+    /// </summary>
+    public static IReadOnlyList<string> ContextFilesFor(string page)
+    {
+        var files = new List<string>();
+
+        if (!OptsOutOfSharedContext(page))
+        {
+            files.Add(Path.Combine(ContextRoot, SharedFile));
+
+            var directories = page.Split('/')[..^1];
+            for (var depth = 1; depth <= directories.Length; depth++)
+                files.Add(
+                    Path.Combine(
+                        new[] { ContextRoot }
+                            .Concat(directories.Take(depth))
+                            .Append(SectionFile)
+                            .ToArray()
+                    )
+                );
+        }
+
+        files.Add(ContextFileFor(page));
+        return files.Where(File.Exists).ToList();
+    }
+
+    /// <summary>Whether the page's front matter says <c>snippet_context: none</c>.</summary>
+    public static bool OptsOutOfSharedContext(string page)
+    {
+        var file = RepoRoot.Combine(page.Split('/'));
+        return File.Exists(file)
+            && OptsOutOfSharedContextIn(File.ReadAllText(file).Replace("\r\n", "\n"));
+    }
+
+    public static bool OptsOutOfSharedContextIn(string markdown) =>
+        NoSnippetContext.IsMatch(markdown);
 
     /// <summary>
     /// The unit's errors and warnings, each as <c>page.md:line:column: severity id: message</c>.
@@ -125,8 +193,7 @@ public static class SnippetCompiler
                 )
             );
 
-        var context = ContextFileFor(unit.Page);
-        if (File.Exists(context))
+        foreach (var context in ContextFilesFor(unit.Page))
             trees.Add(
                 CSharpSyntaxTree.ParseText(
                     File.ReadAllText(context),
@@ -145,7 +212,8 @@ public static class SnippetCompiler
             References.Value,
             new CSharpCompilationOptions(
                 executable ? OutputKind.ConsoleApplication : OutputKind.DynamicallyLinkedLibrary,
-                nullableContextOptions: NullableContextOptions.Enable
+                nullableContextOptions: NullableContextOptions.Enable,
+                specificDiagnosticOptions: MSBuildNoWarn
             )
         );
 

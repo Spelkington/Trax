@@ -8,11 +8,12 @@ namespace Trax.Core.Exceptions;
 /// Trax supplies the vocabulary; a consumer supplies the matching through <c>IFailureClassifier</c>,
 /// because only the consumer knows what its remote system's errors mean.
 /// </remarks>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/trains-and-junctions/train-exception">SDK reference</seealso>
 public enum FailureClass
 {
     /// <summary>
     /// No classifier was registered, or it did not recognise this failure. Means "decide as you
-    /// would have before this existed" — the default, so behaviour is unchanged until something
+    /// would have before this existed": the default, so behaviour is unchanged until something
     /// deliberately acts on a classification.
     /// </summary>
     Unclassified = 0,
@@ -22,10 +23,11 @@ public enum FailureClass
     /// reported as an error.
     /// </summary>
     /// <remarks>
-    /// A client-side timeout that surfaces as an <see cref="OperationCanceledException"/>, as an
-    /// <c>HttpClient</c> timeout does, is recorded as a cancellation and never reaches a classifier.
-    /// Catch it in the junction and rethrow it as something the classifier recognises to have it
-    /// counted here.
+    /// An <see cref="OperationCanceledException"/> the run was not asked for, such as an
+    /// <c>HttpClient</c> timeout, is recorded as a failure and goes to the classifier like any
+    /// other. When the classifier gives no answer or answers <see cref="Unclassified"/>, it is
+    /// counted here. A cancellation the run was asked for (its token, or the persisted cancel
+    /// flag) is recorded as cancelled and never classified.
     /// </remarks>
     Transient = 1,
 
@@ -37,7 +39,7 @@ public enum FailureClass
     Conflict = 2,
 
     /// <summary>
-    /// Will fail the same way every time — a validation error, a missing record, a rejected
+    /// Will fail the same way every time: a validation error, a missing record, a rejected
     /// credential. Retrying is waste.
     /// </summary>
     Permanent = 3,

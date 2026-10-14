@@ -1,0 +1,8 @@
+# SDK reference pages missing `package:`, `namespace:` or `source:` in their front matter, recorded
+# when SdkReferenceFrontMatterTests was added (2026-10-13). One page path per line, relative to
+# Trax.Docs, in ordinal order.
+#
+# Do NOT add to this list: state the three fields (namespace is not needed with `surface: graphql`
+# or `surface: typescript`). Delete a page's line once it states them, or when the page moves or is
+# deleted; a stale line fails the test.
+

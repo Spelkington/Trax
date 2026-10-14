@@ -11,6 +11,11 @@ namespace Trax.Scheduler.Services.TraxScheduler;
 /// <summary>
 /// Provides a type-safe API for scheduling trains as recurring jobs.
 /// </summary>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/scheduler-api/i-trax-scheduler">SDK reference</seealso>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/scheduler-api/schedule">SDK reference</seealso>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/scheduler-api/schedule-many">SDK reference</seealso>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/scheduler-api/dependent-scheduling">SDK reference</seealso>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/scheduler-api/manifest-management">SDK reference</seealso>
 public interface ITraxScheduler
 {
     /// <summary>
@@ -77,7 +82,9 @@ public interface ITraxScheduler
     /// <remarks>
     /// All manifests are created/updated in a single transaction. If any manifest
     /// fails to save, the entire batch is rolled back. Pruning (if enabled via
-    /// <see cref="ScheduleOptions.PrunePrefix"/>) is also included in the same transaction.
+    /// <see cref="ScheduleOptions.PrunePrefix"/>) runs after that transaction commits, on a
+    /// context of its own. A prune that fails is logged as a warning and does not fail the call;
+    /// the saved manifests stay, and the stale ones are pruned on a later call.
     /// </remarks>
     /// <exception cref="InvalidOperationException">
     /// Thrown when the train is not registered in the TrainRegistry.

@@ -1,25 +1,32 @@
 ---
-layout: default
 title: Schedule / ScheduleAsync
 description: Reference for Schedule and ScheduleAsync, which upsert one recurring manifest by external id, with ScheduleOptions, manifest-level and group-level settings.
+type: reference
+area: scheduling
 parent: Scheduler API
 grand_parent: SDK Reference
-nav_order: 3
+nav_order: 4
+package: Trax.Scheduler
+namespace:
+  - Trax.Scheduler.Configuration
+  - Trax.Scheduler.Services.TraxScheduler
+source:
+  - Trax.Scheduler/src/Trax.Scheduler/Configuration/SchedulerConfigurationBuilder/SchedulerConfigurationBuilder.InferredScheduling.cs
+  - Trax.Scheduler/src/Trax.Scheduler/Configuration/SchedulerConfigurationBuilder/SchedulerConfigurationBuilder.Scheduling.cs
+  - Trax.Scheduler/src/Trax.Scheduler/Configuration/ScheduleOptions.cs
+  - Trax.Scheduler/src/Trax.Scheduler/Configuration/ManifestGroupOptions.cs
+  - Trax.Scheduler/src/Trax.Scheduler/Services/TraxScheduler/ITraxScheduler.cs
 ---
 
 # Schedule / ScheduleAsync
 
-Schedules a single train to run on a recurring basis. `Schedule` is used at startup configuration time; `ScheduleAsync` is used at runtime via `ITraxScheduler`.
-
-Both use **upsert semantics**: if a manifest with the given `externalId` already exists, it is updated; otherwise a new one is created.
+Schedules one train to run on an interval or a cron, as one manifest keyed by its external id: an existing manifest with the id is updated, otherwise one is created. `Schedule` is on `SchedulerConfigurationBuilder`, for startup; `ScheduleAsync` is on `ITraxScheduler`, for runtime. `ScheduleOptions` configures both.
 
 ## Signatures
 
-### Startup (SchedulerConfigurationBuilder, Recommended)
+### SchedulerConfigurationBuilder
 
-The input type `TInput` is inferred from the `TTrain` interface at configuration time, so only a single type parameter is needed:
-
-```csharp
+```csharp fragment
 public SchedulerConfigurationBuilder Schedule<TTrain>(
     string externalId,
     IManifestProperties input,
@@ -29,13 +36,7 @@ public SchedulerConfigurationBuilder Schedule<TTrain>(
     where TTrain : class
 ```
 
-The method resolves `TInput` by reflecting on `TTrain`'s `IServiceTrain<TInput, TOutput>` interface. If the provided `input` doesn't match the expected type, an `InvalidOperationException` is thrown at configuration time. The output type is not constrained: scheduled trains can return any output type, and the output is discarded for background jobs.
-
-### Startup (SchedulerConfigurationBuilder, Explicit Type Parameters)
-
-The legacy three-type-parameter form is still available for backward compatibility:
-
-```csharp
+```csharp fragment
 public SchedulerConfigurationBuilder Schedule<TTrain, TInput, TOutput>(
     string externalId,
     TInput input,
@@ -46,9 +47,9 @@ public SchedulerConfigurationBuilder Schedule<TTrain, TInput, TOutput>(
     where TInput : IManifestProperties
 ```
 
-### Runtime (ITraxScheduler)
+### ITraxScheduler
 
-```csharp
+```csharp fragment
 Task<Manifest> ScheduleAsync<TTrain, TInput, TOutput>(
     string externalId,
     TInput input,
@@ -60,7 +61,9 @@ Task<Manifest> ScheduleAsync<TTrain, TInput, TOutput>(
     where TInput : IManifestProperties
 ```
 
-## Type Parameters
+## Parameters
+
+### Type parameters
 
 | Type Parameter | Constraint | Description |
 |---------------|------------|-------------|
@@ -68,7 +71,7 @@ Task<Manifest> ScheduleAsync<TTrain, TInput, TOutput>(
 | `TInput` | `IManifestProperties` | **Inferred at startup** from `TTrain`'s interface. The input type for the train. Must implement `IManifestProperties` (a marker interface) to enable serialization for scheduled job storage. Only required explicitly in the explicit three-type-param form and the runtime API. |
 | `TOutput` | _(none)_ | The output type of the train. Not constrained; any output type is accepted. The output is discarded when the job completes. Only required explicitly in the explicit three-type-param form and the runtime API. |
 
-## Parameters
+### Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -78,11 +81,11 @@ Task<Manifest> ScheduleAsync<TTrain, TInput, TOutput>(
 | `options` | `Action<ScheduleOptions>?` | No | `null` | Optional callback to configure all scheduling options via a fluent builder. Includes manifest-level settings (`Priority`, `Enabled`, `MaxRetries`, `Timeout`), group-level settings (`.Group(...)` with `MaxActiveJobs`, `Priority`, `Enabled`), and batch settings (`PrunePrefix`). See [ScheduleOptions](#scheduleoptions) below. |
 | `ct` | `CancellationToken` | No | `default` | Cancellation token (runtime API only). |
 
-## ScheduleOptions
+### ScheduleOptions
 
-The `ScheduleOptions` fluent builder consolidates all optional scheduling parameters:
+The builder the `options` callback receives.
 
-### Manifest-level methods
+#### Manifest-level methods
 
 | Method | Description |
 |--------|-------------|
@@ -90,14 +93,14 @@ The `ScheduleOptions` fluent builder consolidates all optional scheduling parame
 | `.Enabled(bool)` | Whether the manifest is enabled. Unstated, a new manifest is enabled and an existing one keeps its current state, so a runtime disable survives a restart. |
 | `.MaxRetries(int)` | Retries after the first run before dead-lettering: the manifest is dead-lettered when its failures within its failure window (`FailureWindow`, or the scheduler's `FailureCountWindow`) exceed it. `0` runs once and dead-letters on the first failure; the default `3` allows four attempts. Unstated, a new manifest takes the scheduler's `DefaultMaxRetries` (3) and an existing one keeps its value, including a runtime change. Throws `ArgumentOutOfRangeException` for a negative value. |
 | `.FailureWindow(TimeSpan)` | How far back this manifest's failed runs count toward its retry backoff and `MaxRetries`, in place of the scheduler's `FailureCountWindow`. Stored in whole seconds; throws `ArgumentOutOfRangeException` unless between one second and ten years. Written to an existing manifest only when stated, so a manifest that stops stating it keeps the window it has. |
-| `.ReplayDecisionsOnRetry(bool)` | Whether a retry of this manifest's failed run, automatic or a requeue of its dead letter, replays the decisions that run recorded instead of asking its deciders again, when the failed run recorded its decisions and was given the same input. Ordinary junctions run again either way. Stated, it is written on every seed, so `true` turns replay back on over an operator's runtime opt-out at each restart. Unstated, a new manifest replays and an existing one keeps its value, including a runtime change. See [Retries replay decisions](/docs/scheduler/dead-letters-and-cleanup#retries-replay-decisions). |
+| `.ReplayDecisionsOnRetry(bool)` | Whether a retry of this manifest's failed run, automatic or a requeue of its dead letter, replays the decisions that run recorded instead of asking its deciders again, when the failed run recorded its decisions and was given the same input. Ordinary junctions run again either way. Stated, it is written on every seed, so `true` turns replay back on over an operator's runtime opt-out at each restart. Unstated, a new manifest replays and an existing one keeps its value, including a runtime change. See [Retries replay decisions](/docs/scheduler/how-retries-work#retries-replay-decisions). |
 | `.Timeout(TimeSpan)` | Job execution timeout. Unstated, a new manifest uses the global `DefaultJobTimeout` and an existing one keeps its value. |
 | `.OnMisfire(MisfirePolicy)` | Misfire policy for missed runs. Unstated: the scheduler's `DefaultMisfirePolicy` (`FireOnceNow`). `FireOnceNow` fires immediately; `DoNothing` skips and waits for the next natural occurrence. Only applies to Cron and Interval types. |
 | `.MisfireThreshold(TimeSpan)` | Grace period before the misfire policy takes effect. Overrides the global `DefaultMisfireThreshold`. |
 | `.Variance(TimeSpan)` | Adds random jitter to the schedule. After each successful run, the next execution is delayed by `[0, variance]` seconds. Applies to `Interval` and `Cron` schedules only; on a dependent or one-off manifest it is ignored. If `Schedule.WithVariance()` is also set, the schedule-level value takes precedence. See [Schedule Variance](/docs/scheduler/scheduling-options#schedule-variance). |
 | `.Exclude(Exclusion)` | Adds an exclusion window. The manifest is skipped when any exclusion matches the current time. Multiple can be combined. Use `Exclude.DaysOfWeek(...)`, `Exclude.Dates(...)`, `Exclude.DateRange(...)`, or `Exclude.TimeWindow(...)` factories. See [Exclusion Windows](/docs/scheduler/exclusions). |
 
-### Group-level methods
+#### Group-level methods
 
 | Method | Description |
 |--------|-------------|
@@ -105,7 +108,7 @@ The `ScheduleOptions` fluent builder consolidates all optional scheduling parame
 | `.Group(string groupId, Action<ManifestGroupOptions>)` | Sets group name and configures group dispatch settings. |
 | `.Group(Action<ManifestGroupOptions>)` | Configures group dispatch settings without changing the group name. |
 
-### ManifestGroupOptions
+#### ManifestGroupOptions
 
 | Method | Description |
 |--------|-------------|
@@ -120,9 +123,19 @@ Each group setting is written only when stated: an existing group keeps any sett
 - **Startup**: `SchedulerConfigurationBuilder`, for continued fluent chaining.
 - **Runtime**: `Task<Manifest>`, the created or updated manifest record.
 
-## Examples
+## Behavior
 
-### Startup Configuration (Recommended, Inferred Input Type)
+- `Schedule<TTrain>` takes `TInput` from `TTrain`'s `IServiceTrain<TInput, TOutput>` interface and throws `InvalidOperationException` when the scheduler is built if `input` is not of that type. The output is unconstrained and discarded. The form with explicit type parameters remains for compatibility.
+- `AddScheduler` extends the builder `AddMediator` returns, so it comes after `AddEffects` and `AddMediator`; called earlier, it does not compile.
+- At startup, manifests are not created immediately. They are captured and seeded when the application starts via `SchedulerStartupService`.
+- At runtime, `ScheduleAsync` creates/updates the manifest in the database immediately.
+- The `externalId` is the primary key for upsert logic. Changing it creates a new manifest rather than updating the existing one.
+- If the train type is not registered in the `TrainRegistry` (via `AddMediator`), an `InvalidOperationException` is thrown.
+- The group is determined by `.Group(...)` on `ScheduleOptions`. When not specified, it defaults to the `externalId`. Groups are auto-created (upserted by name) during scheduling. Orphaned groups are cleaned up on startup.
+- For **one-off jobs** that should run once and auto-disable, use [ScheduleOnceAsync](/docs/sdk-reference/scheduler-api/manifest-management#scheduleonceasync) instead of `ScheduleAsync`. It creates a manifest with `ScheduleType.Once` and needs no `Schedule` object. See [Delayed / One-Off Jobs](/docs/scheduler/delayed-jobs) for details.
+- A `Schedule` (from `Every`, `Cron`, `Schedule.FromInterval` or `Schedule.FromCron`) carries its own `Variance`, set with `WithVariance`; see [Scheduling helpers](/docs/sdk-reference/scheduler-api/scheduling-helpers#schedule-record).
+
+## Examples
 
 ```csharp compile
 services.AddTrax(trax => trax
@@ -141,10 +154,9 @@ services.AddTrax(trax => trax
 );
 ```
 
-`AddScheduler` extends the builder `AddMediator` returns, so it comes after `AddEffects` and
-`AddMediator`; called earlier, it does not compile. Only the train interface type is specified. The input type (`SyncInput`) is inferred from `ISyncTrain : IServiceTrain<SyncInput, TOutput>` and validated at configuration time. The output type is not constrained. It can be `Unit` or any other type, and the output is discarded for background jobs.
+The input type, `SyncInput`, is taken from `ISyncTrain : IServiceTrain<SyncInput, Unit>`.
 
-### Runtime Scheduling
+At runtime:
 
 ```csharp compile
 public class MyService(ITraxScheduler scheduler)
@@ -160,38 +172,9 @@ public class MyService(ITraxScheduler scheduler)
 }
 ```
 
-## Schedule Record
+## See also
 
-The `Schedule` record defines the timing for a scheduled manifest. Create instances via `Every.*`, `Cron.*`, or `Schedule.FromInterval()` / `Schedule.FromCron()`.
-
-### Properties
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `Type` | `ScheduleType` | `Interval` or `Cron`. |
-| `Interval` | `TimeSpan?` | The interval between runs (Interval type only). At least one second: `Schedule.FromInterval` throws `ArgumentOutOfRangeException` for anything shorter. |
-| `CronExpression` | `string?` | The cron expression, evaluated in UTC (Cron type only). `Schedule.FromCron` parses it and throws `FormatException` when it is invalid or has no occurrence in the next ten years. A new cron first runs at its first occurrence after it is scheduled. |
-| `Variance` | `TimeSpan?` | Optional random jitter added after each successful run. |
-
-### Methods
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `WithVariance(TimeSpan variance)` | `Schedule` | Returns a new `Schedule` with the specified variance. The next run after each success is delayed by a random `[0, variance]` duration. A `Schedule` is always `Interval` or `Cron`, so any schedule accepts it. A negative variance throws `InvalidOperationException` when the manifest is scheduled. |
-
-```csharp compile
-// Interval with 2-minute jitter
-var every5Minutes = Every.Minutes(5).WithVariance(TimeSpan.FromMinutes(2));
-
-// Cron with 30-minute jitter
-var dailyAt3 = Cron.Daily(3).WithVariance(TimeSpan.FromMinutes(30));
-```
-
-## Remarks
-
-- At startup, manifests are not created immediately. They are captured and seeded when the application starts via `SchedulerStartupService`.
-- At runtime, `ScheduleAsync` creates/updates the manifest in the database immediately.
-- The `externalId` is the primary key for upsert logic. Changing it creates a new manifest rather than updating the existing one.
-- If the train type is not registered in the `TrainRegistry` (via `AddMediator`), an `InvalidOperationException` is thrown.
-- The group is determined by `.Group(...)` on `ScheduleOptions`. When not specified, it defaults to the `externalId`. Groups are auto-created (upserted by name) during scheduling. Orphaned groups are cleaned up on startup.
-- For **one-off jobs** that should run once and auto-disable, use [ScheduleOnceAsync](/docs/sdk-reference/scheduler-api/manifest-management#scheduleonceasync) instead of `ScheduleAsync`. It creates a manifest with `ScheduleType.Once` and needs no `Schedule` object. See [Delayed / One-Off Jobs](/docs/scheduler/delayed-jobs) for details.
+- [Scheduling helpers](/docs/sdk-reference/scheduler-api/scheduling-helpers), `Every`, `Cron`, `Schedule` and `ManifestOptions`
+- [Scheduling options](/docs/scheduler/scheduling-options), what each option does to a run
+- [ScheduleMany / ScheduleManyAsync](/docs/sdk-reference/scheduler-api/schedule-many) and [Dependent scheduling](/docs/sdk-reference/scheduler-api/dependent-scheduling)
+- [Manifest management](/docs/sdk-reference/scheduler-api/manifest-management#scheduleonceasync), one-off jobs

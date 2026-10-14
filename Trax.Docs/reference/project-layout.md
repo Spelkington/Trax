@@ -1,17 +1,12 @@
 ---
-layout: default
-title: Project Layout
-description: "Where things live: a Trax application's trains, data and tests, and in the Trax repository, data models, migrations, builders, samples and tests."
-parent: Reference
-nav_order: 11
+title: Structuring your application
+description: "How the project templates lay out a Trax application, where trains, data and tests go, and when to move trains into a class library."
+type: explanation
+area: general
+nav_order: 3
 ---
 
-# Project Layout
-
-Where each kind of thing lives. The first section is for an application built on Trax; the rest
-is for contributing to the Trax repository itself.
-
-## Your own application
+# Structuring your application
 
 The [project templates](/docs/reference/templates) lay a Trax server out like this, and nothing
 in Trax depends on the folder names, so treat it as a convention rather than a requirement:
@@ -35,89 +30,94 @@ MyCompany.Hub/
 ```
 
 `AddMediator(typeof(Program).Assembly)` registers every train in the assembly, wherever it sits,
-so adding a train is adding its folder. When the trains outgrow the host, move `Trains/` into a
-class library, reference it from the host, and name both assemblies in `AddMediator`; a train in
-an assembly `AddMediator` does not scan is not registered. A second process (a separate scheduler
-or worker) references the same library and points at the same database. The
-[Samples](/docs/samples) show those splits.
+so adding a train is adding its folder. A train in an assembly `AddMediator` does not scan is not
+registered.
 
-## Contributing to Trax
+## Trains in a class library
 
-Before adding something to Trax, find an existing example of the same kind and
-mirror it: the same directory depth, the same naming, the same partial-class split.
+When the trains outgrow the host, or a second process needs them, they move into a class library
+and each process becomes a thin executable that references it. The library holds what the
+application does: the trains and their junctions, the `I<Name>Train` interfaces, the inputs and
+outputs, the constants manifests are scheduled under, and any shared models. It has no
+`Program.cs` and no `appsettings.json`. The executables decide how it runs: one schedules, one
+serves GraphQL, one only polls for jobs, or one process does all three. Every process that runs
+the trains points at the same database.
 
-### Data models
-
-A persisted model is a pair of files in two projects:
-
-```
-Trax.Effect/src/Trax.Effect/Models/<Entity>/<Entity>.cs
-Trax.Effect/src/Trax.Effect.Data/Models/<Entity>/Persistent<Entity>.cs
-```
-
-The base class carries the `[Column]` attributes, from
-`System.ComponentModel.DataAnnotations.Schema` rather than from EF, which is what lets
-`Trax.Effect` be referenced without EF Core. `Persistent<Entity>` inherits from it and adds a
-static `OnModelCreating` that does the EF mapping through the Fluent API:
-`entity.ToTable("manifest", "trax")`, the key, the index, the `jsonb` column types. `[Table]`
-is not used in either tree.
-
-Not everything under `Models/` is a table. `Models/Host/TraxHostInfo.cs` is process identity
-and `Models/JunctionMetadata/` is in-flight junction state, and neither has a `Persistent*`
-counterpart. A folder can also hold more than the entity: `Models/Manifest/` carries
-`Manifest.cs`, `Exclusion.cs`, `IManifestProperties.cs` and a `DTOs/` folder. Put the entity,
-the interface it satisfies and its DTOs together; do not split them across `Models/`.
-
-Each provider has its own `DbContext` subclass at
-`Trax.Effect/src/Trax.Effect.Data.<Provider>/Services/<Provider>Context/<Provider>Context.cs`,
-sharing shape through the base `DataContext<TDbContext>` in `Trax.Effect.Data`. The providers
-are `Postgres`, `Sqlite` and `InMemory`.
-
-### Migrations
+Not every sample is split this way. Auth and SignalRBroadcaster are single hosts with their trains
+inside them, which is the template layout above. The [Energy Hub](/docs/samples/energy-hub) sample
+is the split at its plainest: a library, a hub and a worker.
 
 ```
-Trax.Effect/src/Trax.Effect.Data.Postgres/Migrations/<NNN>_<name>.sql
-Trax.Effect/src/Trax.Effect.Data.Sqlite/Migrations/<NNN>_<name>.sql
+Trax.Samples.EnergyHub/            class library: trains, ManifestNames, roles, event names
+  Trains/<Area>/<Train>/           I<Train>Train.cs, <Train>Train.cs, input, output, Junctions/
+  ManifestNames.cs
+Trax.Samples.EnergyHub.Hub/        executable: scheduler, GraphQL, dashboard
+  Program.cs
+Trax.Samples.EnergyHub.Worker/     executable: runs the queued jobs
+  Program.cs
 ```
 
-Numbered sequentially from 001 with no gaps, embedded by a csproj glob. The two sets are
-numbered independently. `Trax.Effect.Data.InMemory` has no `Migrations/` folder: the EF
-in-memory provider stores objects rather than tables, so there is no DDL to run. See
-[Writing Migrations](/docs/reference/writing-migrations).
+The library is a plain `Microsoft.NET.Sdk` project with the ASP.NET Core framework reference and
+the Trax packages its trains compile against:
 
-### Builders
+```xml from=Trax.Samples/samples/DistributedWorkers/Trax.Samples.EnergyHub/Trax.Samples.EnergyHub.csproj
+<Project Sdk="Microsoft.NET.Sdk">
+<!-- ... -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
 
-A partial class in its own directory, one file per feature area. See
-[Builder Pattern](/docs/reference/builder-pattern).
-
-### Sample applications
-
-Most samples are three or four projects under `Trax.Samples/samples/<Topic>/`:
-
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
+    <ProjectReference Include="../../../../Trax.Effect/src/Trax.Effect/Trax.Effect.csproj" />
+    <ProjectReference Include="../../../../Trax.Effect/src/Trax.Effect.Data.Postgres/Trax.Effect.Data.Postgres.csproj" />
+    <ProjectReference Include="../../../../Trax.Mediator/src/Trax.Mediator/Trax.Mediator.csproj" />
+    <ProjectReference Include="../../../../Trax.Scheduler/src/Trax.Scheduler/Trax.Scheduler.csproj" />
+  </ItemGroup>
+</Project>
 ```
-Trax.Samples.<Name>            the train library, with [TraxQuery] trains under Trains/
-Trax.Samples.<Name>.Api        the GraphQL host (or .Hub)
-Trax.Samples.<Name>.Client     the consumer (or .Scheduler, .Worker, .Runner)
+
+The samples build against the Trax projects in the repository, so they use `ProjectReference`
+where an application uses a `PackageReference` at the release version. The library's code uses
+nothing from `Trax.Effect.Data.Postgres`; the reference is there so both executables get
+`UsePostgres` through it. A library that leaves the data provider out works as well, with each
+executable referencing it instead.
+
+Each executable is a `Microsoft.NET.Sdk.Web` project that references the library and adds the
+packages for what that process does. The worker needs only the effect providers and the RabbitMQ
+broadcaster:
+
+```xml from=Trax.Samples/samples/DistributedWorkers/Trax.Samples.EnergyHub.Worker/Trax.Samples.EnergyHub.Worker.csproj
+<Project Sdk="Microsoft.NET.Sdk.Web">
+<!-- ... -->
+  <ItemGroup>
+    <ProjectReference Include="..\Trax.Samples.EnergyHub\Trax.Samples.EnergyHub.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../../Trax.Effect/src/Trax.Effect.Provider.Json/Trax.Effect.Provider.Json.csproj" />
+    <ProjectReference Include="../../../../Trax.Effect/src/Trax.Effect.Provider.Parameter/Trax.Effect.Provider.Parameter.csproj" />
+    <ProjectReference Include="../../../../Trax.Effect/src/Trax.Effect.JunctionProvider.Progress/Trax.Effect.JunctionProvider.Progress.csproj" />
+    <ProjectReference Include="../../../../Trax.Effect/src/Trax.Effect.Broadcaster.RabbitMQ/Trax.Effect.Broadcaster.RabbitMQ.csproj" />
+  </ItemGroup>
+</Project>
 ```
 
-A sample that demonstrates one thing is one project: `samples/Auth/` and
-`samples/SignalRBroadcaster/` are each a single web host with its trains under `Trains/`, because
-neither has anything to say about a second process. Split when a second process has to exist
-for the sample to make its point, not before. Bookworm goes the other way with five, because
-cross-schema edges need a project of their own.
+The hub adds the dashboard, Trax.Api, its API key scheme and Trax.Api.GraphQL on top of the same
+library. In each executable's `Program.cs`, `AddMediator` names an assembly the library owns, so
+the train bus scans the library rather than the host:
 
-Resolvers and `[ExtendObjectType]` classes belong in a project, not in `Program.cs`. Which
-project depends on what they extend: subscription extensions live in the train library
-(`Trax.Samples.ChatService/Subscriptions/`), cross-schema edges in the project that owns the
-join (`Trax.Samples.Bookworm.CrossSchema/Edges/`), and an extension over a type the host
-defines lives in the host (`Trax.Samples.Auth/Data/ArticleExtensions.cs`).
+```csharp from=Trax.Samples/samples/DistributedWorkers/Trax.Samples.EnergyHub.Hub/Program.cs
+        .AddMediator(typeof(ManifestNames).Assembly)
+```
 
-### Tests
+Pin exact Trax versions, once for the solution in `Directory.Packages.props`, as the templates do:
+a floating `Version="1.*"` restores whatever was published last, and a minor release can change an
+API the trains call. Every Trax package releases at one version.
 
-See [Test Conventions](/docs/reference/test-conventions) for the folder layout and the
-fixture patterns.
+How these executables can be arranged across processes, and which sample runs each arrangement, is
+in [Deployment topologies](/docs/reference/deployment-topologies).
 
-### When you cannot find a pattern
-
-Ask before improvising. A new pattern introduced without justification is almost always a
-missed pattern that already exists.
+Contributing to Trax itself? The repository's own layout is in
+[Repository layout](/docs/contributing/repository-layout).

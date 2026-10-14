@@ -1,7 +1,16 @@
 ---
-layout: default
 title: Trax.Core.Testing
 description: "Reference for Trax.Core.Testing, the base architecture-guard package: ArchitectureGuardOptions, GuardResult, file helpers and the hygiene and convention guards."
+type: reference
+area: testing
+package: Trax.Core.Testing
+namespace:
+  - Trax.Core.Testing
+  - Trax.Core.Testing.Fixtures
+  - Trax.Core.Testing.Guards
+  - Trax.Core.Testing.Infrastructure
+source:
+  - Trax.Core/src/Trax.Core.Testing
 parent: Testing
 grand_parent: SDK Reference
 nav_order: 1
@@ -9,27 +18,111 @@ nav_order: 1
 
 # Trax.Core.Testing
 
-The base package of Trax's architecture guards: the options and result types every guard shares, the helpers that find a repository's files, and three sets of guards of its own. The other guard packages (`Trax.Effect.Data.Testing`, `Trax.Mediator.Testing`, `Trax.Api.GraphQL.Testing`) build on it. See [Architecture Guards](/docs/reference/architecture-guards) for how they fit together.
+The base package of Trax's architecture guards: the options and result types every guard shares, the helpers that find a repository's files, and three sets of guards of its own. The other guard packages ([Trax.Effect.Data.Testing](/docs/sdk-reference/testing/effect-data-testing), [Trax.Mediator.Testing](/docs/sdk-reference/testing/mediator-testing), [Trax.Api.GraphQL.Testing](/docs/sdk-reference/testing/graphql-testing)) build on it. Each guard is a static checker that returns a `GuardResult`; the hygiene and repo-convention guards also come as NUnit fixtures to subclass. The package references NUnit, for the fixtures.
 
-Each guard is available two ways: as a static checker that returns a `GuardResult` you assert on with any framework, and, for the hygiene and repo-convention guards, as an NUnit fixture you subclass.
+## Signatures
 
-## ArchitectureGuardOptions
-
-```csharp
+```csharp fragment
 namespace Trax.Core.Testing;
 
 public sealed record ArchitectureGuardOptions
 {
     public string? RepoRootOverride { get; init; }
-    public IReadOnlyList<string> TestScanRoots { get; init; }          // ["tests"]
-    public IReadOnlyList<string> SourceScanRoots { get; init; }        // ["src"]
+    public IReadOnlyList<string> TestScanRoots { get; init; }
+    public IReadOnlyList<string> SourceScanRoots { get; init; }
     public IReadOnlySet<string> NoIgnoreKnownExceptions { get; init; }
     public IReadOnlySet<string> FixedDelayKnownExceptions { get; init; }
-    public string ExpectedDirectoryBuildPropsVersion { get; init; }    // "1.99.99"
-    public string TraxPackagePrefix { get; init; }                     // "Trax."
+    public string ExpectedDirectoryBuildPropsVersion { get; init; }
+    public string TraxPackagePrefix { get; init; }
     public IReadOnlySet<string> CrossRepoPackageKnownExceptions { get; init; }
 }
+
+public sealed record GuardResult(IReadOnlyList<string> Offenders, int Inspected, string FailureMessage)
+{
+    public bool Passed { get; }
+}
 ```
+
+```csharp fragment
+namespace Trax.Core.Testing.Guards;
+
+public static class HygieneGuards
+{
+    public static GuardResult NoIgnoreAttribute(ArchitectureGuardOptions options);
+    public static GuardResult NoLegacyAsserts(ArchitectureGuardOptions options);
+    public static GuardResult NoFixedDelays(ArchitectureGuardOptions options);
+}
+
+public static class RepoConventionGuards
+{
+    public static GuardResult DirectoryBuildPropsVersion(ArchitectureGuardOptions options);
+    public static GuardResult CrossRepoPackageVersions(ArchitectureGuardOptions options);
+}
+
+public sealed record ForeignVocabulary(string Library, IReadOnlyList<string> Attributes, string Replacement);
+
+public static class VocabularyGuards
+{
+    public static GuardResult TraxVocabularyIsUsed(
+        IReadOnlyList<ForeignVocabulary> banned,
+        ArchitectureGuardOptions? options = null,
+        IReadOnlyDictionary<string, string>? allowed = null
+    );
+}
+```
+
+```csharp fragment
+namespace Trax.Core.Testing.Fixtures;
+
+[TestFixture]
+public abstract class HygieneGuardFixture
+{
+    protected virtual ArchitectureGuardOptions Options { get; }
+
+    [Test] public void Tests_do_not_use_the_Ignore_attribute();
+    [Test] public void Tests_do_not_use_legacy_asserts();
+    [Test] public void Tests_do_not_use_fixed_delays();
+}
+
+[TestFixture]
+public abstract class RepoConventionGuardFixture
+{
+    protected virtual ArchitectureGuardOptions Options { get; }
+
+    [Test] public void Directory_build_props_pins_the_expected_version();
+    [Test] public void Cross_repo_package_references_are_centrally_managed();
+}
+```
+
+```csharp fragment
+namespace Trax.Core.Testing.Infrastructure;
+
+public static class RepoRoot
+{
+    public static string Path { get; }
+    public static string Combine(params string[] segments);
+    public static string Relative(string absolute);
+}
+
+public static class SourceFiles
+{
+    public static IEnumerable<string> CSharp(params string[] subdirs);
+    public static IEnumerable<string> Projects(params string[] subdirs);
+    public static IEnumerable<string> Markdown(params string[] subdirs);
+    public static IEnumerable<string> CSharpUnder(string root, params string[] subdirs);
+    public static IEnumerable<string> ProjectsUnder(string root, params string[] subdirs);
+}
+
+public static class SourceText
+{
+    public static string StripCommentsAndStrings(string source);
+    public static IReadOnlyList<(int LineNumber, string Line)> MatchingLines(string source, Regex pattern);
+}
+```
+
+## Members
+
+### ArchitectureGuardOptions
 
 | Property | Default | Description |
 |----------|---------|-------------|
@@ -44,23 +137,16 @@ public sealed record ArchitectureGuardOptions
 
 Allowlist paths are repo-relative with forward slashes.
 
-## GuardResult
-
-```csharp
-public sealed record GuardResult(IReadOnlyList<string> Offenders, int Inspected, string FailureMessage)
-{
-    public bool Passed { get; }
-}
-```
+### GuardResult
 
 | Member | Description |
 |--------|-------------|
-| `Offenders` | One description per violation, usually `path:line (reason)` |
+| `Offenders`| One description per violation, usually `path:line (reason)` |
 | `Inspected` | How many files or items the guard examined. A guard that inspected nothing checked nothing; assert it is above zero. |
 | `FailureMessage` | The rule, how to fix a violation, and the offender list |
 | `Passed` | `Offenders` is empty |
 
-## Infrastructure
+### Infrastructure
 
 | Type | Members | Description |
 |------|---------|-------------|
@@ -68,7 +154,7 @@ public sealed record GuardResult(IReadOnlyList<string> Offenders, int Inspected,
 | `SourceFiles` | `CSharp`, `Projects`, `Markdown`, `CSharpUnder`, `ProjectsUnder` | Enumerate `*.cs`, `*.csproj` and `*.md` files under the root, or under an explicit root |
 | `SourceText` | `StripCommentsAndStrings(string)`, `MatchingLines(string, Regex)` | Blank out comments and string literals so a pattern matches code only; list the matching lines with their numbers |
 
-## Hygiene guards
+### Hygiene guards
 
 | Checker (`HygieneGuards`) | Flags, in `TestScanRoots` |
 |---------------------------|---------------------------|
@@ -76,35 +162,22 @@ public sealed record GuardResult(IReadOnlyList<string> Offenders, int Inspected,
 | `NoLegacyAsserts(options)` | NUnit's own asserts: `Assert.That`, `Assert.AreEqual` and the rest of the classic family, `ClassicAssert`, `CollectionAssert`, `StringAssert`. The convention is one assertion library. |
 | `NoFixedDelays(options)` | `Task.Delay(` and `Thread.Sleep(`, unless the line or one of the three above it carries a comment with `determinism:`, `allowed-delay:`, `measuring-interval:` or `negative-wait:` |
 
-`HygieneGuardFixture` (`Trax.Core.Testing.Fixtures`) runs all three as NUnit tests. Subclass it, override `Options` if the defaults do not fit, and the inherited tests run in your assembly. Each test fails first if the guard inspected nothing, then on any offender.
+`HygieneGuardFixture` (`Trax.Core.Testing.Fixtures`) runs all three as NUnit tests, `Tests_do_not_use_the_Ignore_attribute`, `Tests_do_not_use_legacy_asserts` and `Tests_do_not_use_fixed_delays`, with the options its virtual `Options` property returns (the defaults unless a subclass overrides it). Each test fails first if the guard inspected nothing, then on any offender.
 
-## Repo-convention guards
+### Repo-convention guards
 
 | Checker (`RepoConventionGuards`) | Checks |
 |----------------------------------|--------|
 | `DirectoryBuildPropsVersion(options)` | The root `Directory.Build.props` exists and its `<Version>` equals `ExpectedDirectoryBuildPropsVersion` |
 | `CrossRepoPackageVersions(options)` | Every `PackageReference` whose id starts with `TraxPackagePrefix` carries no `Version` or `VersionOverride` and has a `<PackageVersion>` pin in the root `Directory.Packages.props` |
 
-`RepoConventionGuardFixture` runs both as NUnit tests.
+`RepoConventionGuardFixture` runs both as NUnit tests, `Directory_build_props_pins_the_expected_version` and `Cross_repo_package_references_are_centrally_managed`, with the same `Options` property and the same two failures.
 
-These encode a build convention for a codebase split across several repositories that consume each other's Trax packages: each repository's own version is a fixed local-development placeholder, and every Trax package it consumes is pinned once, centrally. The version check expects `1.99.99` by default, the placeholder Trax keeps in each folder's `Directory.Build.props`. Trax itself is one repository whose packages reference each other with `ProjectReference`, so it has no Trax pins for `CrossRepoPackageVersions` to check. A consumer repository that versions differently either sets `ExpectedDirectoryBuildPropsVersion` to its own value or does not use this fixture.
+These encode a build convention for a codebase split across several repositories that consume each other's Trax packages: each repository's own version is a fixed local-development placeholder, and every Trax package it consumes is pinned once, centrally. The version check expects `1.99.99` by default, the placeholder Trax keeps in each folder's `Directory.Build.props`. Trax itself is one repository whose packages reference each other with `ProjectReference`, so it has no Trax pins for `CrossRepoPackageVersions` to check. A repository that versions differently sets `ExpectedDirectoryBuildPropsVersion` to its own value.
 
-## Vocabulary guard
+### Vocabulary guard
 
-```csharp
-public sealed record ForeignVocabulary(string Library, IReadOnlyList<string> Attributes, string Replacement);
-
-public static class VocabularyGuards
-{
-    public static GuardResult TraxVocabularyIsUsed(
-        IReadOnlyList<ForeignVocabulary> banned,
-        ArchitectureGuardOptions? options = null,
-        IReadOnlyDictionary<string, string>? allowed = null
-    );
-}
-```
-
-Reports every use of a listed third-party attribute where Trax has its own, in both `SourceScanRoots` and `TestScanRoots`.
+`TraxVocabularyIsUsed` reports every use of a listed third-party attribute where Trax has its own, in both `SourceScanRoots` and `TestScanRoots`. Comments and string literals are ignored.
 
 | Parameter | Description |
 |-----------|-------------|
@@ -112,25 +185,35 @@ Reports every use of a listed third-party attribute where Trax has its own, in b
 | `options` | Scan roots and repo root; defaults apply when `null` |
 | `allowed` | Repo-relative paths exempt from the scan, each mapped to the reason: the translation layer that has to speak the library's language, and the tests that write the refused attribute on purpose |
 
-Comments and string literals are ignored.
+## Examples
 
-```csharp
-[Test]
-public void Resolvers_use_Trax_authorization_attributes()
+A checker called directly, with any assertion library:
+
+```csharp compile
+using Trax.Core.Testing.Guards;
+
+var result = VocabularyGuards.TraxVocabularyIsUsed([
+    new ForeignVocabulary("HotChocolate", ["Authorize", "AllowAnonymous"], "[TraxAuthorize] or [TraxAllowAnonymous]"),
+]);
+
+if (result.Inspected == 0 || !result.Passed)
+    throw new InvalidOperationException(result.FailureMessage);
+```
+
+The fixtures, subclassed in an NUnit test project; `[TestFixture]` on each subclass is what lets the runner find the inherited tests:
+
+```csharp fragment
+[TestFixture]
+public sealed class HygieneGuards : HygieneGuardFixture
 {
-    var result = VocabularyGuards.TraxVocabularyIsUsed(
-        [new ForeignVocabulary("HotChocolate", ["Authorize", "AllowAnonymous"],
-            "[TraxAuthorize] or [TraxAllowAnonymous]")]);
-
-    result.Inspected.Should().BeGreaterThan(0);
-    result.Offenders.Should().BeEmpty(result.FailureMessage);
+    protected override ArchitectureGuardOptions Options => new() { TestScanRoots = ["tests", "e2e"] };
 }
+
+[TestFixture]
+public sealed class RepoConventionGuards : RepoConventionGuardFixture { }
 ```
 
-## Package
+## See also
 
-```
-dotnet add package Trax.Core.Testing
-```
-
-It references NUnit, for the fixtures.
+- [Architecture Guards](/docs/reference/architecture-guards), how the guard packages fit together
+- [Testing](/docs/sdk-reference/testing), the other test-support packages

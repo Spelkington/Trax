@@ -6,6 +6,7 @@ namespace Trax.Scheduler.Services.Operations;
 /// behaviourally identical: a queue/cancel/update from the React (or Blazor) dashboard
 /// runs the same code path as the same call from the GraphQL API.
 /// </summary>
+/// <seealso href="https://traxsharp.net/docs/sdk-reference/scheduler-api/i-operations-service">SDK reference</seealso>
 public interface IOperationsService
 {
     /// <summary>
@@ -755,8 +756,9 @@ public interface IOperationsService
     /// parent → dependent.
     /// </summary>
     /// <returns>
-    /// <c>null</c> if the group does not exist or contains no manifests with cross-group
-    /// dependencies; otherwise a graph that always includes the focal group as a node.
+    /// <c>null</c> if the group does not exist; otherwise a graph that always includes the focal
+    /// group as a node. A group with no manifests, or with no cross-group dependencies, returns a
+    /// graph holding only the focal group and no edges.
     /// </returns>
     Task<ManifestGroupDependencyGraph?> GetManifestGroupDependencyGraphAsync(
         long groupId,

@@ -1,9 +1,12 @@
 ---
-layout: default
 title: Junction Events
 description: "AddJunctionEvents: each step of a run published live and stored in trax.junction_run, what a step carries, SignalR, RabbitMQ, GraphQL and the dashboard."
-parent: Effect
-nav_order: 9
+type: reference
+area: effects
+nav_order: 7
+source:
+  - Trax.Effect/src/Trax.Effect.Data/JunctionEvents
+  - Trax.Effect/src/Trax.Effect/Services/TrainEventBroadcaster/IJunctionEventHandler.cs
 ---
 
 # Junction Events
@@ -16,9 +19,10 @@ a timeline.
 
 They are off unless the host calls `AddJunctionEvents()`:
 
-```csharp
+```csharp compile
 using Trax.Effect.Data.Extensions;            // AddJunctionEvents (package Trax.Effect.Data)
 using Trax.Effect.Data.Postgres.Extensions;   // UsePostgres (package Trax.Effect.Data.Postgres)
+using Trax.Effect.Extensions;
 
 services.AddTrax(trax => trax.AddEffects(effects => effects
     .UsePostgres(connectionString)
@@ -69,9 +73,9 @@ a `JunctionEventPayload`:
 | `Position`, `Kind`, `Name` | Where the step falls, what it is, and the junction's class name without its namespace, or a question's key. `(withheld)` when `NameWithheld` is set. |
 | `State` | `InProgress`, `Completed`, `Failed` or `Cancelled` |
 | `StartedAt`, `EndedAt`, `DurationMs` | UTC times, and the junction's duration once it ends |
-| `FailureClass`, `FailureException` | How a failed junction's failure is [classified](/docs/core/trains-and-junctions#classifying-failures), and its exception's type name |
+| `FailureClass`, `FailureException` | How a failed junction's failure is [classified](/docs/effect/failure-classification), and its exception's type name |
 | `QuestionKey`, `Answer`, `Confidence` | For a question or track: its [key](/docs/core/decisions#question-keys), the option, score or probability the run acted on, and the decider's confidence. Null on a withheld track. |
-| `Replayed` | True when the answer was [replayed](/docs/effect/decisions#re-queued-and-retried-runs-replay-their-decisions) from an earlier run. Set on the question's step only: a `Route` step carries false even when the decision it routes on was replayed. False on a retry that asked afresh, whatever the reason; why is in `trax.decision` (see [Building a train that recovers](/docs/effect/decisions#building-a-train-that-recovers)). |
+| `Replayed` | True when the answer was [replayed](/docs/effect/decisions#re-queued-and-retried-runs-replay-their-decisions) from an earlier run. Set on the question's step only: a `Route` step carries false even when the decision it routes on was replayed. False on a retry that asked afresh, whatever the reason; why is in `trax.decision` (see [Recover a deciding train without asking the model again](/docs/effect/recover-a-deciding-train#4-check-what-the-retry-did)). |
 | `Decider` | The decider's type name. Live events only, and null on a withheld track. |
 | `AnswerWithheld` | True when the question is about a `[TraxSensitive]` type, and for every question or route on a withheld track |
 | `NameWithheld` | True for every step (a junction, a question or a route) after a route whose answer is withheld; its `Name` is `(withheld)` (`JunctionEventPayload.WithheldName`) |
@@ -92,7 +96,10 @@ answers are withheld from every junction event and every `trax.junction_run` row
 that the question was asked and answered, with `AnswerWithheld` set, but not the option, score,
 probability, confidence or the track taken on it.
 
-```csharp
+```csharp compile
+using Trax.Core.Decisions;
+using Trax.Effect.Attributes;
+
 [TraxSensitive]
 [Asks("Should this account be flagged for fraud review?")]
 public sealed class FlagForFraud;
@@ -104,37 +111,27 @@ saw. The key is checked as well: a closed form of a marked generic type, a type 
 type that takes one as a type argument, and a key that merely shares a name with a marked type are
 all withheld.
 
-Withholding the answer withholds the path too. The steps a track runs would say which track it
-took, so every step after a withheld route, whatever its kind, is published, handed to local
-handlers and stored with its name as `(withheld)`, `NameWithheld` set and no `NodeId`, since a
-node id names the track and the step. A later question or route
+Every step after a withheld route, whatever its kind, is published, handed to local handlers and
+stored with its name as `(withheld)`, `NameWithheld` set and no `NodeId`. A later question or route
 also has its `QuestionKey`, `Answer`, `Confidence` and `Decider` left out, with `AnswerWithheld`
 set. `trax.decision` keeps the full answer either way, because a requeue replays it from there; the
 journal's log writes it as withheld, and also withholds the question key, answer, track and decider
 of every later decision, refusal and route of the run.
 
-Some facts about a withheld track stay visible, by design, because they describe the run rather
-than its data:
-
-- how many steps ran after the route, their positions and kinds, and when each started and how long
-  it took, which can differ from track to track
-- a junction that failed there: its exception's type and failure class
-- the run's own failure, whose junction `metadata.failure_junction` and the train's `Failed` event
-  name as they always have (junction events themselves carry `FailureJunction` as null)
-- a train started from a junction on the track, which is a run of its own, named, with steps of its
-  own
-
-A host for which these say too much should not turn junction events on for that train, and should
-keep it off a broadcast feed.
+These stay visible on a withheld track: how many steps ran after the route, their positions and
+kinds, their start times and durations; a failed junction's exception type and failure class; the
+run's own failure (`metadata.failure_junction` and the train's `Failed` event; junction events
+carry `FailureJunction` as null); and a train started from a junction on the track, which is a run
+of its own. [How junction events withhold a track](/docs/effect/junction-events-withholding)
+explains why the path is withheld with the answer, and what that leaves exposed.
 
 ### Steps on a track
 
 Every step after a route carries `TrackPosition`, the route's position. Trax.Core reports where a
 track starts but not where it rejoins the chain, so every step after a route counts as on its track.
-A consumer that does not show a reader the answers should not show the names or question keys of
-steps with a `TrackPosition` either, since they name the track: the SignalR sink and the GraphQL
-broadcast view withhold them by default, as below. This errs toward hiding: a step that runs on
-every track after the rejoin is hidden too.
+The SignalR sink and the GraphQL broadcast view withhold the names and question keys of steps with
+a `TrackPosition` by default, as below, so a step that runs on every track after the rejoin is
+hidden too.
 
 ### Placing a step on the train's graph
 
@@ -171,7 +168,9 @@ has a transport, to the junction event handlers of other hosts. A junction event
 `ITrainEventHandler`, so a handler written for train events is never handed an event type it does
 not know.
 
-```csharp
+```csharp compile=handler
+using Trax.Effect.Services.TrainEventBroadcaster;
+
 public sealed class StepLogger(ILogger<StepLogger> logger) : IJunctionEventHandler
 {
     public Task HandleAsync(TrainLifecycleEventMessage message, CancellationToken ct)
@@ -182,6 +181,10 @@ public sealed class StepLogger(ILogger<StepLogger> logger) : IJunctionEventHandl
         return Task.CompletedTask;
     }
 }
+```
+
+```csharp compile=handler
+using Trax.Effect.Services.TrainEventBroadcaster;
 
 services.AddScoped<IJunctionEventHandler, StepLogger>();
 ```
@@ -210,7 +213,10 @@ holding up the run. Stopping the host drains what is queued.
 
 Read a run's steps through `IDataContext.JunctionRuns` and `ForRun`, which orders them by position:
 
-```csharp
+```csharp compile
+using Microsoft.EntityFrameworkCore;
+using Trax.Effect.Data.JunctionEvents;
+
 var steps = await dataContext.JunctionRuns.AsNoTracking().ForRun(metadataId).ToListAsync(ct);
 ```
 
@@ -224,15 +230,14 @@ was not stored, not one still running.
 [metadata cleanup](/docs/scheduler/admin-trains/metadata-cleanup), manifest pruning and any other
 delete of metadata remove a run's steps with it.
 
-The table ships in the core migration set: Postgres `055`, `057`, `060`, `067` and `068`, Sqlite
-`020`, `022`, `025`, `030` and `031`.
+The table ships in the core migration set of the Postgres and Sqlite providers.
 
 ### Attempt
 
 A run of a manifest carries which attempt it is: 1 plus the manifest's failed runs since its last
 completed or cancelled one, skipping dispatch attempts the scheduler requeued. It is read once,
 when the run begins, from the manifest's 1000 most recent runs before this one (each one's state and
-failure exception, newest first through the `(manifest_id, id)` index, Postgres `058`, Sqlite `023`),
+failure exception, newest first through the `(manifest_id, id)` index),
 so its cost does not grow with the manifest's history; a longer streak is reported as 1001. The run
 waits on it for at most a second. A
 run with no manifest carries none, and a read that fails or times out leaves it out and the run
@@ -243,8 +248,11 @@ alone.
 The [SignalR sink](/docs/sdk-reference/configuration/use-signalr-hub#junction-events) sends
 junction events to clients only when told to:
 
-```csharp
-effects.UseBroadcaster(b => b.UseSignalRHub(opts => opts.WithJunctionEvents()))
+```csharp compile
+using Trax.Effect.Broadcaster.SignalR.Extensions;
+using Trax.Effect.Extensions;
+
+effects.UseBroadcaster(b => b.UseSignalRHub(opts => opts.WithJunctionEvents()));
 ```
 
 | Option | Sends |
@@ -261,7 +269,7 @@ is full it gives up junction events before train events.
 
 ## RabbitMQ
 
-With [`UseRabbitMq`](/docs/sdk-reference/configuration/use-broadcaster#rabbitmq), junction events
+With [`UseRabbitMq`](/docs/sdk-reference/configuration/use-rabbit-mq), junction events
 are published to a fanout exchange of their own, `<ExchangeName>.junctions` by default
 (`trax.lifecycle.junctions`), set with `JunctionExchangeName`. It must differ from `ExchangeName`,
 or `UseRabbitMq` throws.
@@ -290,7 +298,7 @@ Trax.Api forwards junction events to one subscription and reads the stored steps
 | Field | Returns | Who may use it |
 |---|---|---|
 | [`onJunctionEvent(metadataId: Long!)`](/docs/sdk-reference/graphql-api/subscriptions#onjunctionevent) | The steps of one run, live | Exactly who would receive that run's train events: every train for the operations view, `[TraxBroadcast]` trains whose posture admits the caller for everyone else |
-| [`operations.junctionRuns(metadataId, afterPosition, take)`](/docs/sdk-reference/graphql-api/queries#junctionruns) | The stored steps of one run, in order | The operations gate, as `operations.execution` |
+| [`operations.junctionRuns(metadataId, afterPosition, take)`](/docs/sdk-reference/graphql-api/queries/executions#junctionruns) | The stored steps of one run, in order | The operations gate, as `operations.execution` |
 
 The run is a required argument: there is no feed of every run's steps. Outside the operations view
 a step loses host detail, as a train event does: the decider's type name, and a failure's exception
@@ -298,7 +306,7 @@ type unless it is a `TrainException`. It also carries no `answer` or `confidence
 after a route, of any kind, arrives with its name `(withheld)`, `nameWithheld` set and its
 `questionKey` null, unless the host calls `AllowJunctionAnswersForBroadcastSubscribers()` on
 `AddTraxGraphQL`: the same default the SignalR payload has. Its kind, position, state, timing and
-failure class still arrive, so keep a train whose tracks must not be told apart off broadcast. The
+failure class still arrive. The
 operations view always sees answers. A host with an API-key or JWT scheme refuses a socket
 that brings no credential in `connection_init`, even for a train marked `[TraxAllowAnonymous]`, so a
 broadcast subscriber on such a host is an authenticated caller without the operations gate's role or
@@ -323,7 +331,7 @@ question and answer, with no confidence), and a failed step's failure class and 
 shown when its rows carry one. It reads at most the first 500 steps and says so when the run
 recorded more. While the run is running it re-reads only new and in-progress steps; once the run
 has finished it reads every step twice more and stops, so a later change shows after a reload. A run with no stored steps shows a hint naming `AddJunctionEvents()`.
-See [Dashboard: Metadata Detail Page](/docs/dashboard#metadata-detail-page).
+See [Dashboard: Metadata Detail Page](/docs/dashboard/pages#metadata-detail-page).
 
 ## SDK Reference
 
