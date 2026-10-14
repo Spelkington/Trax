@@ -8,8 +8,8 @@ namespace Trax.Cli.Tests.IntegrationTests;
 /// <summary>
 /// End-to-end byte-parity: the CLI, running real node against the sibling Trax.Api.StateMachine engine, must
 /// reproduce the committed turnstile artifacts exactly. This is the whole point of the tool, so it is proven
-/// against the real generators, not a fake. Skipped at runtime (never a hard failure) when node is unavailable
-/// or the sibling engine is not checked out beside this repo, per the repo's determinism rules.
+/// against the real generators, not a fake. Skipped at runtime when node is unavailable or the sibling engine is
+/// not checked out beside this repo, except under CI, where that fails the test.
 /// </summary>
 public class MachineGeneratorNodeTests
 {
@@ -22,11 +22,13 @@ public class MachineGeneratorNodeTests
     public void SetUp()
     {
         if (!new NodeRunner().IsAvailable())
-            Assert.Ignore("node is not on PATH; skipping the real-node byte-parity test.");
+            NodePrerequisite.Missing(
+                "node is not on PATH; skipping the real-node byte-parity test."
+            );
 
         var engineRoot = FindEngineRoot();
         if (engineRoot is null)
-            Assert.Ignore(
+            NodePrerequisite.Missing(
                 "Trax.Api.StateMachine is not checked out beside Trax.Cli; skipping byte-parity test."
             );
 
@@ -96,6 +98,11 @@ public class MachineGeneratorNodeTests
     [Test]
     public void Generate_reproduces_the_committed_ingest_artifacts_with_outcome_triggers_byte_for_byte() =>
         AssertByteParityWithCommitted(new DeclarativeIngestMachine(), "ingest");
+
+    // Guards that compare with lt, gte and lte, whose corpus holds both runtimes to the same bounds.
+    [Test]
+    public void Generate_reproduces_the_committed_gauge_artifacts_byte_for_byte() =>
+        AssertByteParityWithCommitted(new DeclarativeGaugeMachine(), "gauge");
 
     // A timed state exports its timer as a trigger of its own kind, which the twin shows and never fires and the
     // corpus replays through AdvanceTimer. The committed reminder artifacts are written by the generation this

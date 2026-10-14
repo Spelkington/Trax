@@ -212,6 +212,151 @@ public class MachineRendererTests
             );
     }
 
+    // Dealing invokes a train: its outcomes are the only way out of Dealing and the only way into Guessing and
+    // Lost, so a renderer that read transitions alone would call both unreachable.
+    private const string Cards = """
+        {
+          "id": "cards", "version": 1, "initialState": "Idle",
+          "states": ["Idle", "Dealing", "Guessing", "Lost"],
+          "transitions": [ { "from": "Idle", "trigger": "Deal", "to": "Dealing" } ],
+          "outcomes": {
+            "Dealing.done": { "state": "Dealing", "outcome": "done", "train": "Cards.Deal",
+              "edges": [ { "to": "Guessing",
+                           "guard": { "rule": "compare", "source": "input", "field": "rank", "op": "gt", "value": 0 } },
+                         { "to": "Lost" } ] },
+            "Dealing.failed": { "state": "Dealing", "outcome": "failed", "train": "Cards.Deal",
+              "edges": [ { "to": "Lost" } ] },
+            "Dealing.cancelled": { "state": "Dealing", "outcome": "cancelled", "train": "Cards.Deal",
+              "edges": [] }
+          }
+        }
+        """;
+
+    [Test]
+    public void Outcome_targets_are_reachable()
+    {
+        var text = MachineRenderer.Render(Cards, MachineFormat.Text);
+
+        text.Should().NotContain("unreachable");
+        text.Should()
+            .Be(
+                """
+                cards  v1   initial: Idle
+
+                Idle ◀ initial
+                  ── Deal ────────────▶ Dealing
+
+                Dealing
+                  ── Dealing.done ────▶ Guessing   guard: compare
+                  ── Dealing.done ────▶ Lost
+                  ── Dealing.failed ──▶ Lost
+
+                Guessing
+                  (no transitions)
+
+                Lost
+                  (no transitions)
+
+                """.ReplaceLineEndings("\n")
+            );
+    }
+
+    [TestCase("mermaid", "Dealing --> Guessing : Dealing.done")]
+    [TestCase("dot", "\"Dealing\" -> \"Guessing\" [label=\"Dealing.done")]
+    public void Diagrams_draw_outcome_edges(string name, string edge)
+    {
+        var format = name == "dot" ? MachineFormat.Dot : MachineFormat.Mermaid;
+
+        MachineRenderer.Render(Cards, format).Should().Contain(edge);
+    }
+
+    // Scoring's outcome has several guarded `done` edges, tried in order, two of which lead to Won; its `failed`
+    // edge leads to Won too, so Scoring -> Won is drawn three times, once per edge, each with its own label.
+    private const string Scores = """
+        {
+          "id": "scores", "version": 2, "initialState": "Idle",
+          "states": ["Idle", "Scoring", "Won", "Lost"],
+          "transitions": [ { "from": "Idle", "trigger": "Play", "to": "Scoring" } ],
+          "outcomes": {
+            "Scoring.done": { "state": "Scoring", "outcome": "done", "train": "Game.Score",
+              "edges": [ { "to": "Won",
+                           "guard": { "rule": "compare", "source": "input", "field": "points", "op": "gte", "value": 100 } },
+                         { "to": "Won",
+                           "guard": { "rule": "present", "source": "input", "field": "bonus" },
+                           "reduce": { "reduce": "merge" } },
+                         { "to": "Lost",
+                           "guard": { "rule": "compare", "source": "input", "field": "points", "op": "lt", "value": 10 } },
+                         { "to": "Idle" } ] },
+            "Scoring.failed": { "state": "Scoring", "outcome": "failed", "train": "Game.Score",
+              "edges": [ { "to": "Won" } ] }
+          }
+        }
+        """;
+
+    [Test]
+    public void Several_guarded_done_edges_are_listed_in_the_order_they_are_tried()
+    {
+        var text = MachineRenderer.Render(Scores, MachineFormat.Text);
+
+        text.Should()
+            .Be(
+                """
+                scores  v2   initial: Idle
+
+                Idle ◀ initial
+                  ── Play ────────────▶ Scoring
+
+                Scoring
+                  ── Scoring.done ────▶ Won       guard: compare
+                  ── Scoring.done ────▶ Won       guard: present   reduce: merge
+                  ── Scoring.done ────▶ Lost      guard: compare
+                  ── Scoring.done ────▶ Idle
+                  ── Scoring.failed ──▶ Won
+
+                Won
+                  (no transitions)
+
+                Lost
+                  (no transitions)
+
+                """.ReplaceLineEndings("\n")
+            );
+    }
+
+    [Test]
+    public void Mermaid_draws_each_edge_between_the_same_two_states()
+    {
+        var mermaid = MachineRenderer.Render(Scores, MachineFormat.Mermaid);
+
+        mermaid
+            .Split('\n')
+            .Where(line => line.TrimStart().StartsWith("Scoring --> Won", StringComparison.Ordinal))
+            .Should()
+            .Equal(
+                "    Scoring --> Won : Scoring.done / guard#58; compare",
+                "    Scoring --> Won : Scoring.done / guard#58; present / reduce#58; merge",
+                "    Scoring --> Won : Scoring.failed"
+            );
+        mermaid.Should().Contain("    Scoring --> Idle : Scoring.done\n");
+    }
+
+    [Test]
+    public void Dot_draws_each_edge_between_the_same_two_states()
+    {
+        var dot = MachineRenderer.Render(Scores, MachineFormat.Dot);
+
+        dot.Split('\n')
+            .Where(line =>
+                line.TrimStart().StartsWith("\"Scoring\" -> \"Won\"", StringComparison.Ordinal)
+            )
+            .Should()
+            .Equal(
+                "    \"Scoring\" -> \"Won\" [label=\"Scoring.done\\nguard: compare\"];",
+                "    \"Scoring\" -> \"Won\" [label=\"Scoring.done\\nguard: present\\nreduce: merge\"];",
+                "    \"Scoring\" -> \"Won\" [label=\"Scoring.failed\"];"
+            );
+    }
+
     [Test]
     public void Show_prints_the_machine_from_an_assembly()
     {

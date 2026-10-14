@@ -1,3 +1,4 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // The entrypoints are plain .mjs (they run under `node` from the C# CLI), so the test is .mjs too: it imports
 // and exercises the real code path, and tsc leaves it alone (it only typechecks the .ts engine sources).
 import { parseFlags, requireFlags } from "./lib/args.mjs";
-import { bundleModule } from "./lib/engine-loader.mjs";
+import { bundleModule, loadEngine } from "./lib/engine-loader.mjs";
+import { bundleCli } from "./bundle-cli.mjs";
 import { generateCorpus } from "./generate-corpus.mjs";
 import { generateTwin } from "./generate-twin.mjs";
 
@@ -89,7 +91,7 @@ describe("generate-twin entrypoint", () => {
     expect(machinePath).toBe(join(out, "turnstile.machine.g.ts"));
   });
 
-  it("specifier style emits the collapsed @trax/state-machine import", async () => {
+  it("specifier style emits the collapsed @traxsharp/state-machine import", async () => {
     const { machinePath, contextsPath } = await generateTwin({
       irPath: turnstileIr,
       engineSrc,
@@ -98,7 +100,7 @@ describe("generate-twin entrypoint", () => {
     });
     const machine = read(machinePath);
     expect(machine).toContain(
-      `import { typedMachineFromIr, type IrDocument } from "@trax/state-machine";`,
+      `import { typedMachineFromIr, type IrDocument } from "@traxsharp/state-machine";`,
     );
     expect(machine).not.toContain(`from "../../machine"`);
     // Context types are independent of import style, so they stay byte-identical to the committed file.
@@ -218,5 +220,71 @@ describe("bundleModule", () => {
         throw new Error("not installed");
       }),
     ).rejects.toThrow(/Could not load esbuild/);
+  });
+
+  it("names the folder to run npm ci in when esbuild is missing", async () => {
+    const failure = bundleModule(join(engineSrc, "index.ts"), () => {
+      throw new Error("not installed");
+    });
+    await expect(failure).rejects.toThrow(`run \`npm ci\` in ${join(repoRoot, ".")}`);
+  });
+});
+
+describe("loadEngine", () => {
+  it("needs the engine's source without the bundled generators", async () => {
+    await expect(loadEngine(undefined)).rejects.toThrow(/Missing required --engine-src/);
+  });
+});
+
+// The generators Trax.Cli ships: bundled with the engine compiled in, run by node with no engine source and
+// nothing installed beside them, they must still reproduce the committed artifacts byte for byte.
+describe("bundleCli", () => {
+  let out;
+  let bundled;
+  beforeEach(async () => {
+    out = mkdtempSync(join(tmpdir(), "trax-bundle-"));
+    bundled = mkdtempSync(join(tmpdir(), "trax-bundled-"));
+    await bundleCli(bundled);
+  });
+  afterEach(() => {
+    rmSync(out, { recursive: true, force: true });
+    rmSync(bundled, { recursive: true, force: true });
+  });
+
+  const node = (script, ...args) =>
+    execFileSync(process.execPath, [join(bundled, script), ...args], {
+      cwd: out,
+      encoding: "utf8",
+    });
+
+  it("writes a twin and a corpus identical to the committed turnstile's, with no --engine-src", () => {
+    node("generate-twin.mjs", "--ir", turnstileIr, "--out-dir", out);
+    node("generate-corpus.mjs", "--ir", turnstileIr, "--out", join(out, "differential.json"));
+
+    expect(read(join(out, "turnstile.contexts.g.ts"))).toBe(read(committedContexts));
+    expect(read(join(out, "turnstile.machine.g.ts"))).toBe(read(committedMachine));
+    expect(read(join(out, "differential.json"))).toBe(read(committedCorpus));
+  });
+
+  it("writes a specifier twin that records its IR format and imports only what every engine exports", () => {
+    node("generate-twin.mjs", "--ir", turnstileIr, "--out-dir", out, "--import-style", "specifier");
+
+    const twin = read(join(out, "turnstile.machine.g.ts"));
+    expect(twin).toContain('const ir = {\n  "irFormat": 1,');
+    expect(twin).toContain('// Imports the engine from "@traxsharp/state-machine" (trax machine generate');
+    expect(twin.split("\n").filter((line) => line.startsWith("import "))).toEqual([
+      'import { typedMachineFromIr, type IrDocument } from "@traxsharp/state-machine";',
+      'import type { TurnstileSpec } from "./turnstile.contexts.g";',
+    ]);
+  });
+
+  it("refuses --engine-src, which only the engine's own tools take", () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(bundled, "generate-twin.mjs"), "--ir", turnstileIr, "--out-dir", out, "--engine-src", engineSrc],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/carry their own engine/);
   });
 });

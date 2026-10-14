@@ -11,6 +11,7 @@ import type {
 } from "../machines/turnstile/turnstile.contexts.g";
 import { turnstile } from "../machines/turnstile/turnstile.machine.g";
 import { generateContextTypes, generateMachineFactory } from "./generateTypes";
+import { irFormatVersion } from "./irFormat";
 import { machineFromIr, type IrDocument } from "./irMachine";
 
 // The typed generator emits state/trigger unions and a context interface per state from the IR schema. The
@@ -127,6 +128,20 @@ describe("generateContextTypes", () => {
       );
       expect(out).toContain('size?: "s" | null;');
     });
+
+    // What the C# exporter writes for a `List<string>?` property: the element schema in `values`,
+    // with no constraint to read it from.
+    it("gives a nullable list its element type", () => {
+      const out = generateContextTypes(
+        schemaFor({
+          name: "fields",
+          type: "array",
+          nullable: true,
+          values: { type: "string", nullable: false },
+        }),
+      );
+      expect(out).toContain("fields?: string[] | null;");
+    });
   });
 
   it("emits unions and a context interface derived from the schema", () => {
@@ -210,7 +225,7 @@ describe("generateContextTypes", () => {
 });
 
 // The import-style option is what lets a vendoring consumer (nwyc's apps/web) collapse the three relative
-// engine imports into one `@trax/state-machine` import without the hard-coded string `.replace()` its codegen
+// engine imports into one `@traxsharp/state-machine` import without the hard-coded string `.replace()` its codegen
 // test used to do. These pin both styles byte-exact so `trax machine generate --import-style` and any consumer
 // stay in lockstep with the generator.
 describe("generateMachineFactory import styles", () => {
@@ -223,7 +238,7 @@ describe("generateMachineFactory import styles", () => {
     `import type { IrDocument } from "../../rules/irMachine";`,
   ].join("\n");
 
-  const SPECIFIER_IMPORT = `import { typedMachineFromIr, type IrDocument } from "@trax/state-machine";`;
+  const SPECIFIER_IMPORT = `import { typedMachineFromIr, type IrDocument } from "@traxsharp/state-machine";`;
 
   it("defaults to relative imports (unchanged from the no-options call)", () => {
     // The default MUST equal the argless call so the committed in-repo twin and its drift check never move.
@@ -231,10 +246,10 @@ describe("generateMachineFactory import styles", () => {
       generateMachineFactory(ir),
     );
     expect(generateMachineFactory(ir)).toContain(RELATIVE_IMPORTS);
-    expect(generateMachineFactory(ir)).not.toContain("@trax/state-machine");
+    expect(generateMachineFactory(ir)).not.toContain("@traxsharp/state-machine");
   });
 
-  it("specifier style emits exactly the collapsed @trax/state-machine import", () => {
+  it("specifier style emits exactly the collapsed @traxsharp/state-machine import", () => {
     // Byte-exact against nwyc's PACKAGE_IMPORT: symbol order and spacing must match, since this replaces the
     // three `.replace()` calls its codegen test did by hand.
     const out = generateMachineFactory(ir, { importStyle: "specifier" });
@@ -244,14 +259,35 @@ describe("generateMachineFactory import styles", () => {
     expect(out).not.toContain(`from "../../typed"`);
   });
 
-  it("specifier style differs from relative ONLY in the engine import lines", () => {
-    // Everything after the imports (the embedded IR and the export) must be identical, so the two
-    // styles are the same module with a different import head, nothing else.
+  it("specifier style differs from relative only in its header note, imports and IR format", () => {
+    // The two styles are the same module but for the import head, the note saying how it was imported, and the
+    // IR format the installed engine checks; the embedded IR and the export are otherwise identical.
     const relative = generateMachineFactory(ir, { importStyle: "relative" });
     const specifier = generateMachineFactory(ir, { importStyle: "specifier" });
-    expect(specifier.replace(SPECIFIER_IMPORT, RELATIVE_IMPORTS)).toBe(
-      relative,
+    const lines = specifier.split("\n");
+    const note = lines.slice(1, 4).join("\n") + "\n";
+    expect(
+      specifier
+        .replace(note, "")
+        .replace(SPECIFIER_IMPORT, RELATIVE_IMPORTS)
+        .replace(`\n  "irFormat": ${irFormatVersion},`, ""),
+    ).toBe(relative);
+  });
+
+  it("says in the header which import a specifier twin was generated with and how to change it", () => {
+    const out = generateMachineFactory(ir, { importStyle: "specifier" });
+    expect(out.split("\n").slice(0, 5).join("\n")).toBe(
+      [
+        "// AUTO-GENERATED from turnstile.ir.json by generateMachineFactory. Do not edit by hand.",
+        '// Imports the engine from "@traxsharp/state-machine" (trax machine generate --import-style specifier, the',
+        "// default without --engine-src). Name another module with --specifier <module>, or import an engine",
+        "// checkout by relative path with --import-style relative --engine-src <engine/src>.",
+        "",
+      ].join("\n"),
     );
+    expect(
+      generateMachineFactory(ir, { importStyle: "specifier", specifier: "@acme/machines" }),
+    ).toContain('// Imports the engine from "@acme/machines" (trax machine generate');
   });
 
   it("honors a custom specifier", () => {
@@ -262,6 +298,48 @@ describe("generateMachineFactory import styles", () => {
     expect(out).toContain(
       `import { typedMachineFromIr, type IrDocument } from "@acme/machines";`,
     );
+  });
+
+  it("writes the specifier as one string literal, whatever it holds", () => {
+    // trax refuses a specifier that is not a package name; the generator must still never let one end the
+    // string and become code.
+    const hostile = 'x"; globalThis.pwned = true; import "y';
+    const out = generateMachineFactory(ir, {
+      importStyle: "specifier",
+      specifier: hostile,
+    });
+    expect(out).toContain(
+      `import { typedMachineFromIr, type IrDocument } from ${JSON.stringify(hostile)};`,
+    );
+    expect(out).not.toContain(`from "x";`);
+  });
+
+  it("records the IR format in a specifier twin's IR, where an engine older than the check ignores it", () => {
+    const out = generateMachineFactory(ir, { importStyle: "specifier" });
+    expect(out).toContain(`const ir = {\n  "irFormat": ${irFormatVersion},\n  "committedStates"`);
+  });
+
+  it("imports nothing but what every released engine exports, whatever generated it", () => {
+    // A consumer who upgrades the trax tool before the package must still load the twin: an engine from before the
+    // IR format existed exports typedMachineFromIr and IrDocument, and nothing newer.
+    const out = generateMachineFactory(ir, { importStyle: "specifier" });
+    const imports = out.split("\n").filter((line) => line.startsWith("import "));
+    expect(imports).toEqual([
+      SPECIFIER_IMPORT,
+      `import type { TurnstileSpec } from "./turnstile.contexts.g";`,
+    ]);
+  });
+
+  it("records no IR format in a relative twin, which imports the engine that generated it", () => {
+    expect(generateMachineFactory(ir)).not.toContain("irFormat");
+  });
+
+  it("builds a specifier twin's IR on the engine of today", () => {
+    const out = generateMachineFactory(ir, { importStyle: "specifier" });
+    const literal = out.slice(out.indexOf("const ir = ") + "const ir = ".length, out.indexOf(" as IrDocument;"));
+    const twinIr = JSON.parse(literal) as IrDocument;
+    expect(twinIr.irFormat).toBe(irFormatVersion);
+    expect(() => machineFromIr(twinIr)).not.toThrow();
   });
 
   it("still strips the differential block regardless of import style", () => {

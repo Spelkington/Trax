@@ -59,7 +59,7 @@ The message names each offending edge and state. `Rule.Custom` and `Reduction.Cu
 | `transitions` | object[] | the edges, sorted by `(from, trigger, to)` |
 | `outcomes` | object | outcome trigger name to its outcome, for states that [invoke a train](#outcomes); omitted when the machine invokes nothing |
 | `timers` | object[] | the [timers](#timers) of the timed states, sorted by state; omitted when the machine has none |
-| `differential` | object | the test-only fuzzing inputs authored with `.Differential(...)`: `samples` (per trigger), `seeds` (per state), and `contexts` (probes). Omitted when the machine declares none, and stripped from the generated runtime machine (it drives only the cross-language differential test). |
+| `differential` | object | the test-only fuzzing inputs authored with `.Differential(...)`: `samples` (per trigger), `seeds` (per state: the context itself, or a list of contexts when the state is seeded more than once), and `contexts` (probes). Omitted when the machine declares none, and stripped from the generated runtime machine (it drives only the cross-language differential test). |
 
 A schema (under `context`, `inputs`, or an outcome's `output`) is
 `{ "fields": [ { "name", "type", "nullable", "constraints", "minimum"?, "maximum"?, "enum"?, "enumExact"?, "format"?, "fields"?, "values"?, "keys"? } ] }`,
@@ -115,6 +115,16 @@ field whose CLR type gives its text a shape carries `format`:
 Every digit is ASCII. Both runtimes check the same patterns and the same calendar, so a value gets one verdict in
 each; where the CLR reader is looser (a relative `Uri`, a time without seconds), the format is stricter.
 
+## The format's version
+
+The IR's shape is versioned as a whole, apart from any machine's `version`: the **IR format**, a number the C#
+exporter and the TypeScript engine both declare (`irFormatVersion` in the engine, held equal to the exporter's by a
+test). It changes only when the IR gains something an engine reading the previous format would misread or ignore,
+not with every release. The exported `<machine>.ir.json` does not carry it, so it moves no committed IR and no
+schema hash. A twin generated with specifier imports records it as `irFormat` in the IR it embeds, and the installed
+`@traxsharp/state-machine` refuses, when the twin is imported, a format newer than it reads or older than it still
+reads, saying whether to upgrade the package or regenerate. An IR without `irFormat` is not checked.
+
 ## Transitions
 
 Each transition carries its structure plus its guard and reducer as data:
@@ -131,6 +141,25 @@ A rule is a tagged object keyed by `rule` (`present`, `absent`, `ofType`, `nonEm
 `count`, `length`, `boolEquals`, `arrayOf`, `all`, `any`, `custom`); a reduction is keyed by `reduce` (`keep`,
 `clear`, `reset`, `set`, `custom`).
 See the [data model](/docs/sdk-reference/statemachine-api/declarative-data-model) for each shape.
+
+A rule on a field carries `source` (`"context"` or `"input"`) and `field` (the member's JSON name: its
+`[JsonPropertyName]` when it has one, else its name in camelCase). `compare`, `count`
+and `length` add `op` and a numeric `value`; `op` is `gt`, `gte`, `lt`, `lte` or `eq`. `compare` reads the number
+itself, `count` an array's length and `length` a string's:
+
+```json
+{ "rule": "compare", "source": "input", "field": "rank", "op": "lt", "value": 13 }
+{ "rule": "count", "source": "context", "field": "items", "op": "gte", "value": 1 }
+```
+
+A `set` reduction is a list of steps, each writing one context field. A step's `value` is either an input field
+(`{ "input": <field> }`, from `.FromInput(...)`) or a constant (`{ "const": <JSON value> }`, from `.ToValue(...)`):
+
+```json
+{ "reduce": "set", "steps": [
+  { "field": "paidWith", "value": { "input": "coin" } },
+  { "field": "status", "value": { "const": "paid" } } ] }
+```
 
 ## Outcomes
 

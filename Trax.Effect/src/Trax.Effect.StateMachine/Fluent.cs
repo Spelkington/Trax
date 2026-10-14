@@ -459,10 +459,10 @@ public interface IDifferentialBuilder<TState, TTrigger>
     /// <summary>An empty (<c>{}</c>) input for <paramref name="trigger"/> — distinct from the no-input case.</summary>
     IDifferentialBuilder<TState, TTrigger> EmptySample(TTrigger trigger);
 
-    /// <summary>A seed context for <paramref name="state"/> (a BFS start point that reaches states the initial snapshot can't), from a typed record.</summary>
+    /// <summary>A seed context for <paramref name="state"/> (a BFS start point that reaches states the initial snapshot can't), from a typed record. A state may be seeded several times, and the corpus expands every seed; the same context twice for one state is refused at Build.</summary>
     IDifferentialBuilder<TState, TTrigger> Seed<TContext>(TState state, TContext context);
 
-    /// <summary>A seed context for <paramref name="state"/>, as a raw JSON object.</summary>
+    /// <summary>A seed context for <paramref name="state"/>, as a raw JSON object. A state may be seeded several times, and the corpus expands every seed; the same context twice for one state is refused at Build.</summary>
     IDifferentialBuilder<TState, TTrigger> Seed(TState state, JsonObject context);
 
     /// <summary>A dense probe context crossed with EVERY state (exercises guards/validators on unreachable-but-sendable snapshots), from a typed record.</summary>
@@ -672,7 +672,10 @@ public sealed partial class MachineBuilder<TState, TTrigger> : IMachineBuilder<T
     private readonly Dictionary<TState, List<Rule>> _stateInvariants = [];
     private readonly List<DeclarativeTransition<TState, TTrigger>> _declarativeTransitions = [];
     private readonly Dictionary<TTrigger, List<JsonNode>> _diffSamples = [];
-    private readonly Dictionary<TState, JsonNode> _diffSeeds = [];
+    private readonly Dictionary<TState, List<JsonNode>> _diffSeeds = [];
+
+    // States seeded twice with an equal context; Build refuses them, since the copy adds nothing to the corpus.
+    private readonly HashSet<TState> _diffSeedDuplicates = [];
     private readonly List<JsonNode> _diffContexts = [];
     private readonly Dictionary<string, Func<JsonObject, JsonNode?, bool>> _customGuards = new(
         StringComparer.Ordinal
@@ -985,6 +988,8 @@ public sealed partial class MachineBuilder<TState, TTrigger> : IMachineBuilder<T
         var timers = BuildTimers(invokes);
 
         var declaredInputs = DeclaredInputs();
+        var inputSchemas = InputSchemas(declaredInputs);
+        RefuseUnreadableComparisons(invokes, inputSchemas);
         var rules = BuildRules();
 
         var definition = new MachineDefinition<TState, TTrigger>
@@ -997,7 +1002,7 @@ public sealed partial class MachineBuilder<TState, TTrigger> : IMachineBuilder<T
             ContextValidators = _validators,
             Migrations = _migrations,
             Invokes = invokes,
-            InputSchemas = InputSchemas(declaredInputs),
+            InputSchemas = inputSchemas,
             Timers = timers,
         };
 
@@ -1011,7 +1016,7 @@ public sealed partial class MachineBuilder<TState, TTrigger> : IMachineBuilder<T
                         kv => kv.Key,
                         kv => (IReadOnlyList<JsonNode>)kv.Value
                     ),
-                    _diffSeeds,
+                    _diffSeeds.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<JsonNode>)kv.Value),
                     _diffContexts
                 )
                 {
@@ -1021,6 +1026,12 @@ public sealed partial class MachineBuilder<TState, TTrigger> : IMachineBuilder<T
                     ),
                 }
                 : null;
+
+        if (_diffSeedDuplicates.Count > 0)
+            throw new InvalidOperationException(
+                $"The machine '{_id}' seeds {string.Join(", ", _diffSeedDuplicates)} with the same context more "
+                    + "than once in .Differential(...). An equal seed adds nothing to the corpus; remove the copy."
+            );
 
         if (differential is not null && !_usedDeclarative)
             throw new InvalidOperationException(
@@ -1788,6 +1799,104 @@ public sealed partial class MachineBuilder<TState, TTrigger> : IMachineBuilder<T
                 );
     }
 
+    // A comparison reads a number, so on a field whose schema holds something else (an enum, a string, a DateTime,
+    // which are strings on the wire) it is false for every value: a guard that never holds, built without a word.
+    // Refuse it, naming the field and its type. A field the schema does not describe (an untyped context, a field it
+    // does not list) is left alone. A bound that is not finite is refused too, for a Rule.Compare written by hand.
+    private void RefuseUnreadableComparisons(
+        IReadOnlyDictionary<TState, InvokeDefinition<TState>> invokes,
+        IReadOnlyDictionary<TTrigger, ContextSchema> inputSchemas
+    )
+    {
+        var problems = new List<string>();
+        foreach (var t in _declarativeTransitions)
+            if (t.Guard is { } guard)
+                Check(
+                    guard,
+                    $"the guard of {t.From} -> {t.Trigger}",
+                    t.From,
+                    inputSchemas.GetValueOrDefault(t.Trigger),
+                    $"the input of {t.Trigger}"
+                );
+        foreach (var (state, invariants) in _stateInvariants)
+        foreach (var rule in invariants)
+            Check(rule, $"the Requires of {state}", state, null, null);
+        foreach (var invoke in invokes.Values)
+        foreach (var edge in invoke.Done)
+            if (edge.Guard is { } guard)
+                Check(
+                    guard,
+                    $"the OnDone guard of {invoke.State} -> {edge.To}",
+                    invoke.State,
+                    invoke.OutputSchema,
+                    $"the output of {invoke.TrainType.Name}"
+                );
+
+        if (problems.Count > 0)
+            throw new InvalidOperationException(
+                $"The machine '{_id}' cannot be built: "
+                    + string.Join(
+                        " ",
+                        problems.Distinct().Select(p => char.ToUpperInvariant(p[0]) + p[1..])
+                    )
+            );
+
+        void Check(Rule rule, string site, TState state, ContextSchema? input, string? inputName)
+        {
+            switch (rule)
+            {
+                case Rule.All all:
+                    foreach (var inner in all.Rules)
+                        Check(inner, site, state, input, inputName);
+                    break;
+                case Rule.Any any:
+                    foreach (var inner in any.Rules)
+                        Check(inner, site, state, input, inputName);
+                    break;
+                case Rule.Compare compare:
+                    var method = CompareMethod(compare.Op);
+                    if (!double.IsFinite(compare.Value))
+                    {
+                        problems.Add(
+                            $"{site} compares '{compare.Field}' with {method}"
+                                + $"({compare.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}), "
+                                + "but a comparison needs a finite bound. NaN makes every comparison false, and "
+                                + "the IR has no number for an infinity."
+                        );
+                        break;
+                    }
+                    var (schema, owner) =
+                        compare.Source == RuleSource.Input
+                            ? (input, inputName)
+                            : (_contextSchemas.GetValueOrDefault(state), $"the context of {state}");
+                    var described = schema?.Fields.FirstOrDefault(f =>
+                        string.Equals(f.Name, compare.Field, StringComparison.Ordinal)
+                    );
+                    if (
+                        described is not null
+                        && described.Type is not (JsonFieldType.Number or JsonFieldType.Integer)
+                    )
+                        problems.Add(
+                            $"{site} compares the field '{compare.Field}' of {owner} with {method}, but its "
+                                + $"schema type is {described.Type.ToString().ToLowerInvariant()}, not a number, "
+                                + "so the comparison would be false for every value. Compare a number field, or "
+                                + "use a rule for its type (IsOneOf for an enum or a string)."
+                        );
+                    break;
+            }
+        }
+    }
+
+    private static string CompareMethod(CompareOp op) =>
+        op switch
+        {
+            CompareOp.GreaterThan => "GreaterThan",
+            CompareOp.GreaterOrEqual => "AtLeast",
+            CompareOp.LessThan => "LessThan",
+            CompareOp.LessOrEqual => "AtMost",
+            _ => "EqualTo",
+        };
+
     private static IEnumerable<string> CustomNames(Rule rule) =>
         rule switch
         {
@@ -2218,7 +2327,12 @@ public sealed partial class MachineBuilder<TState, TTrigger> : IMachineBuilder<T
 
         public IDifferentialBuilder<TState, TTrigger> Seed(TState state, JsonObject context)
         {
-            owner._diffSeeds[state] = context;
+            if (!owner._diffSeeds.TryGetValue(state, out var list))
+                owner._diffSeeds[state] = list = [];
+            if (list.Any(seed => JsonNode.DeepEquals(seed, context)))
+                owner._diffSeedDuplicates.Add(state);
+            else
+                list.Add(context);
             return this;
         }
 

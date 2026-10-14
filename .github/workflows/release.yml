@@ -9,10 +9,16 @@ name: Release
 # (Trax.Docs/adr/0042-trax-is-one-repository-and-releases-at-one-version.md).
 # semantic-release reads every commit since the last v* tag and cuts one version at the
 # highest bump those commits call for; every package and the template package are packed at
-# it. The Trax.X/v* tags are the separate repositories' history and are never read.
+# it, and so is the TypeScript engine, @traxsharp/state-machine, on npm. The Trax.X/v* tags
+# are the separate repositories' history and are never read.
 #
-# Trusted publishing on nuget.org matches this repository, this file's name and the
-# `release` environment. Renaming the file breaks publishing until the policy is updated.
+# Trusted publishing on nuget.org and on npm matches this repository, this file's name and
+# the `release` environment. Renaming the file breaks publishing until both are updated.
+# npm's publisher may only stage: each version goes live when a maintainer approves it with
+# 2FA, while the publish job waits (see the "Stage on npm and wait for approval" step).
+#
+# Jobs, in order: build-test (CI, read-only) -> release (tags; the only write token) ->
+# build (packs from the tag, read-only) -> publish (verifies, attests, publishes) -> website.
 on:
   workflow_dispatch:
 
@@ -24,13 +30,21 @@ concurrency:
 permissions: {}
 
 env:
+  # semantic-release runs on this (CI's release-tooling job tests it on the same).
   NODE_VERSION: '22'
+  # The engine is built and packed on this, as CI's state-machine and Trax.Cli jobs build it.
+  BUILD_NODE_VERSION: '24'
+  # npm stages on this: Node 24.21.0 bundles npm 11.19.0, and staged publishing through trusted
+  # publishing needs 11.15.0 or later. An exact version, so the npm that stages is the one bundled
+  # with it and nothing is installed in the publish job.
+  PUBLISH_NODE_VERSION: '24.21.0'
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Untrusted-code zone. The pull-request CI over every folder: restore, build and
-  # test (the bulk of third-party code execution) with NO release or publish
-  # credentials.
+  # Untrusted-code zone. The pull-request CI over every folder, at the commit this
+  # run releases: restore, build, typecheck, test and a trial pack of every library
+  # package and of the TypeScript engine (the bulk of third-party code execution) with NO
+  # release or publish credentials. Nothing below runs unless all of it passed.
   # ---------------------------------------------------------------------------
   build-test:
     permissions:
@@ -41,7 +55,9 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Release/version zone. Holds the GitHub token (tags + release) but NOT the
-  # NuGet publish key. Produces the .nupkg artifact.
+  # NuGet or npm publish credential, and builds and packs nothing: the only code it
+  # runs is the release tooling at the root, installed locked and without install
+  # scripts. It tags the commit build-test validated and hands the version on.
   # ---------------------------------------------------------------------------
   release:
     needs: build-test
@@ -54,7 +70,7 @@ jobs:
     # write access could burn a version number.
     environment: release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
       contents: write         # semantic-release: tags + GitHub release
       issues: write           # semantic-release github plugin: successComment
@@ -62,13 +78,13 @@ jobs:
     outputs:
       released: ${{ steps.version.outputs.released }}
       version: ${{ steps.version.outputs.version }}
-      digests: ${{ steps.digests.outputs.digests }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
           egress-policy: audit
       - name: Checkout
+        # The run's commit, the one build-test validated; semantic-release tags it.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
@@ -79,10 +95,6 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Setup .NET
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
-        with:
-          global-json-file: global.json
       - name: Install release tooling (locked, no install scripts)
         run: npm ci --ignore-scripts
       - name: Run semantic-release
@@ -98,14 +110,86 @@ jobs:
           else
             echo "released=false" >> "$GITHUB_OUTPUT"
           fi
+
+  # ---------------------------------------------------------------------------
+  # Untrusted-code zone. Packs every package at the version just cut, from the tag,
+  # with a read-only token and no publish credential: the npm installs, tsup, the
+  # esbuild bundle Trax.Cli ships, the dashboard's vite build and every MSBuild
+  # target, analyzer and source generator run here and nowhere that can write.
+  # Records each package's digest and uploads the packages for publish.
+  #
+  # It runs after the tag because semantic-release decides the version, and even
+  # its --dry-run needs push access to the repository (it checks it before it reads
+  # a commit). build-test already tried the same packs at this commit (the library
+  # packages and the engine), so a failure here is rare; when one is transient,
+  # "Re-run failed jobs" packs the same tag again without cutting another version.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      digests: ${{ steps.digests.outputs.digests }}
+      npm-digests: ${{ steps.npm-digests.outputs.digests }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: audit
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: refs/tags/v${{ needs.release.outputs.version }}
+          persist-credentials: false
+      - name: The tag is the commit build-test validated
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::The tag points at $(git rev-parse HEAD), not this run's commit $GITHUB_SHA."
+            exit 1
+          fi
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.BUILD_NODE_VERSION }}
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
+        with:
+          global-json-file: global.json
+      - name: Pack the TypeScript engine
+        # @traxsharp/state-machine releases at the same version as the NuGet packages. Its
+        # package.json keeps a placeholder version in git; the released one is written here,
+        # into this checkout only, and never committed. prepack builds dist/ from this tree.
+        # build-test already typechecked and tested this commit's engine. It runs before the
+        # NuGet packs because packing Trax.Cli bundles the generators from this install.
+        working-directory: Trax.Api.StateMachine
+        env:
+          PKG_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          npm ci --ignore-scripts
+          npm version "$PKG_VERSION" --no-git-tag-version
+          mkdir -p ../npm
+          npm pack --pack-destination ../npm
+
+          # Exactly one tarball, at the released version.
+          if [ "$(cd ../npm && ls)" != "traxsharp-state-machine-$PKG_VERSION.tgz" ]; then
+            echo "::error::Expected only traxsharp-state-machine-$PKG_VERSION.tgz, packed: $(ls ../npm)"
+            exit 1
+          fi
+      - name: Install the API dashboard (locked, no install scripts)
+        # Building Trax.Api.Dashboard compiles its React app with these packages and embeds it in
+        # the assembly; packing refuses an assembly without it.
+        working-directory: Trax.Api/src/Trax.Api.Dashboard/ClientApp
+        run: npm ci --ignore-scripts
       - name: Pack every package
         # One version for every package. A folder packs its solution, or the one project
         # packages.json names under release-pack (Trax.Samples ships only its templates).
-        if: steps.version.outputs.released == 'true'
         env:
           # Bind the version to env and reference the shell var (it is pipeline-
           # controlled, but this is the pattern to use for any ${{ }} value).
-          PKG_VERSION: ${{ steps.version.outputs.version }}
+          PKG_VERSION: ${{ needs.release.outputs.version }}
         run: |
           jq -r '.packages[] | select(.dotnet)
                  | .folder + "/" + (.dotnet["release-pack"] // (if .dotnet.pack then .dotnet.solution else empty end))' \
@@ -128,31 +212,43 @@ jobs:
         # Handed to publish as a job output rather than inside the artifact, so publish
         # can tell whether what it downloaded is what this job built.
         id: digests
-        if: steps.version.outputs.released == 'true'
         run: echo "digests=$(cd nupkg && sha256sum -- *.nupkg | base64 -w0)" >> "$GITHUB_OUTPUT"
       - name: Upload package artifact
-        if: steps.version.outputs.released == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: nupkg
           path: nupkg/*.nupkg
           if-no-files-found: error
           retention-days: 1
+      - name: Record npm package digest
+        # Its own output, beside the NuGet digests, for the same reason.
+        id: npm-digests
+        run: echo "digests=$(cd npm && sha256sum -- *.tgz | base64 -w0)" >> "$GITHUB_OUTPUT"
+      - name: Upload npm package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: npm
+          path: npm/*.tgz
+          if-no-files-found: error
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
-  # Publish zone. Consumes the built artifact and pushes it. Runs NO install /
-  # build / test code. Holds the only credential that can publish to NuGet.
+  # Publish zone. Consumes the built artifacts and pushes them. Runs NO install /
+  # build / test code: it downloads the SDK and Node.js toolchains and runs only
+  # their own CLIs. Holds the only credentials that can publish to NuGet and npm.
   # Gated behind the protected `release` environment.
   # ---------------------------------------------------------------------------
   publish:
-    needs: release
+    needs: [release, build]
     if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Most of it is the wait for a maintainer to approve the staged npm version (an hour at
+    # most, in that step).
+    timeout-minutes: 75
     environment: release
     permissions:
       contents: read
-      id-token: write       # OIDC: keyless attestation signing and NuGet trusted publishing
+      id-token: write       # OIDC: keyless attestation signing, NuGet and npm trusted publishing
       attestations: write   # write the SLSA build-provenance attestation
     steps:
       - name: Harden runner
@@ -164,21 +260,127 @@ jobs:
         with:
           name: nupkg
           path: nupkg
-      - name: Verify the packages are the ones release built
+      - name: Download npm package artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: npm
+          path: npm
+      - name: Verify the packages are the ones build built
         env:
-          DIGESTS: ${{ needs.release.outputs.digests }}
+          DIGESTS: ${{ needs.build.outputs.digests }}
+          NPM_DIGESTS: ${{ needs.build.outputs.npm-digests }}
         run: |
-          echo "$DIGESTS" | base64 -d > "$RUNNER_TEMP/expected.sha256"
-          cd nupkg
-          if [ "$(printf '%s\n' *.nupkg | sort)" != "$(awk '{print $2}' "$RUNNER_TEMP/expected.sha256" | sort)" ]; then
-            echo "::error::The downloaded packages are not the set the release job built."
-            exit 1
-          fi
-          sha256sum --check --strict "$RUNNER_TEMP/expected.sha256"
+          # verify <folder> <extension> <base64 sha256sum output>
+          verify() {
+            echo "$3" | base64 -d > "$RUNNER_TEMP/expected-$1.sha256"
+            if [ "$(cd "$1" && printf '%s\n' *."$2" | sort)" != "$(awk '{print $2}' "$RUNNER_TEMP/expected-$1.sha256" | sort)" ]; then
+              echo "::error::The downloaded packages in $1 are not the set the build job built."
+              exit 1
+            fi
+            (cd "$1" && sha256sum --check --strict "$RUNNER_TEMP/expected-$1.sha256")
+          }
+          verify nupkg nupkg "$DIGESTS"
+          verify npm tgz "$NPM_DIGESTS"
       - name: Attest build provenance (SLSA)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
-          subject-path: 'nupkg/*.nupkg'
+          subject-path: |
+            nupkg/*.nupkg
+            npm/*.tgz
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.PUBLISH_NODE_VERSION }}
+          registry-url: 'https://registry.npmjs.org'
+      - name: The bundled npm can stage with OIDC
+        # Staged publishing needs npm 11.15.0 or later (trusted publishing alone, 11.5.1). The npm
+        # checked here is the one bundled with PUBLISH_NODE_VERSION; nothing is installed over it.
+        run: |
+          version=$(npm --version)
+          if [ "$(printf '%s\n' 11.15.0 "$version" | sort -V | head -n 1)" != 11.15.0 ]; then
+            echo "::error::npm $version cannot stage with OIDC; staged publishing needs 11.15.0 or later."
+            exit 1
+          fi
+      # npm goes first, before NuGet: Trax.Cli writes twins that import
+      # @traxsharp/state-machine, so no NuGet package of a version ships until npm holds
+      # that version live and it is the tarball this run built.
+      #
+      # npm trusted publishing: npm exchanges the GitHub OIDC token for a short-lived
+      # credential itself. No stored NPM_TOKEN. The trusted publisher on npmjs.com for
+      # @traxsharp/state-machine names this repository, this workflow file and the `release`
+      # environment, and allows staging only (neither "Allow npm publish" nor "Allow npm
+      # dist-tag"). The tarball's package.json names this repository, which npm checks
+      # against the provenance it signs.
+      #
+      # Staged publishing: this step stages the version, which is not public until a
+      # maintainer approves it with 2FA, so a credential taken from this job cannot put a
+      # version live on its own. The step prints the stage id and the tarball's shasum; the
+      # approver checks that `npm stage list @traxsharp/state-machine` shows that shasum for
+      # that id, then runs `npm stage approve <id>` (or approves it under the package's
+      # Staged Packages tab). The step waits for the version to go live and checks its bytes
+      # before NuGet runs. If no approval comes in time the job fails and nothing reaches
+      # NuGet; approve the staged version, then re-run the job, which finds it live and
+      # carries on.
+      - name: Stage on npm and wait for approval
+        # Staging a version that exists fails on npm, so the step first asks the registry
+        # whether this one is already live. If it is, it is accepted only when npm's
+        # integrity (sha512) and shasum for it are those of the tarball in hand, which the
+        # digest check tied to the build job: a version someone else published first, under
+        # a scope they registered, stops the job before NuGet rather than stand as ours.
+        # Anything but found or not found stops it too, rather than guess. The same check
+        # runs on the version once it goes live after approval.
+        env:
+          PKG_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          : "${NPM_APPROVAL_SECONDS:=3600}" "${NPM_POLL_SECONDS:=30}"
+          tarball="npm/traxsharp-state-machine-$PKG_VERSION.tgz"
+          manifest="$RUNNER_TEMP/npm-version.json"
+          mkdir -p "$RUNNER_TEMP"
+          ours_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
+          ours_shasum=$(sha1sum "$tarball" | cut -d ' ' -f 1)
+          # Prints the registry's status for the version, leaving its manifest in $manifest.
+          ask() {
+            curl -sS --retry 3 -o "$manifest" -w '%{http_code}' \
+              "https://registry.npmjs.org/@traxsharp%2Fstate-machine/$PKG_VERSION" || true
+          }
+          # Ends the step: passes when the live version holds the tarball in hand, fails otherwise.
+          accept() {
+            npm_integrity=$(jq -r '.dist.integrity // ""' "$manifest" || true)
+            npm_shasum=$(jq -r '.dist.shasum // ""' "$manifest" || true)
+            if [ -n "$npm_integrity" ] && [ "$npm_integrity" = "$ours_integrity" ] && [ "$npm_shasum" = "$ours_shasum" ]; then
+              echo "@traxsharp/state-machine@$PKG_VERSION is live on npm, and is the tarball this run built."
+              exit 0
+            fi
+            echo "::error::@traxsharp/state-machine@$PKG_VERSION is live on npm, but it is not the tarball this run built (npm: integrity '$npm_integrity', shasum '$npm_shasum'; built: '$ours_integrity', '$ours_shasum'). Someone else may have published it. Nothing was published to NuGet; find out who published the version before releasing again."
+            exit 1
+          }
+          status=$(ask)
+          case "$status" in
+            200) accept ;;
+            404) ;;
+            *)
+              echo "::error::npm answered $status when asked for @traxsharp/state-machine@$PKG_VERSION."
+              exit 1 ;;
+          esac
+          if ! npm stage publish "$tarball" --provenance --access public --ignore-scripts; then
+            echo "::error::npm refused to stage @traxsharp/state-machine@$PKG_VERSION. If an earlier run staged it, check that its shasum is $ours_shasum, approve it, and re-run this job."
+            exit 1
+          fi
+          note="Approve @traxsharp/state-machine@$PKG_VERSION on npm: check that the staged shasum is $ours_shasum, then run npm stage approve with the stage id printed above."
+          echo "::notice::$note"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "$note" >> "$GITHUB_STEP_SUMMARY"; fi
+          deadline=$((SECONDS + NPM_APPROVAL_SECONDS))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            sleep "$NPM_POLL_SECONDS"
+            status=$(ask)
+            case "$status" in
+              200) accept ;;
+              404) ;;
+              *) echo "npm answered $status; asking again." ;;
+            esac
+          done
+          echo "::error::@traxsharp/state-machine@$PKG_VERSION was staged but not approved within $((NPM_APPROVAL_SECONDS / 60)) minutes. Nothing was published to NuGet. Approve it, then re-run this job."
+          exit 1
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68  # v6.0.0
         with:

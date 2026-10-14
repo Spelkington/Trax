@@ -60,9 +60,7 @@ public class MachineGeneratorTests
             irOut,
             twinOut,
             corpusOut,
-            EngineSrc: twinOut is null && corpusOut is null
-                ? null
-                : Path.Combine(_root, "engine", "src"),
+            EngineSrc: Path.Combine(_root, "engine", "src"),
             importStyle,
             specifier,
             ToolsDir: _tools
@@ -196,13 +194,45 @@ public class MachineGeneratorTests
     }
 
     [Test]
-    public void Generate_twin_without_engine_src_throws()
+    public void Generate_without_engine_src_runs_the_bundled_generators_and_passes_them_no_engine_src()
+    {
+        var node = new FakeNodeRunner();
+        var options = new MachineGenerateOptions(
+            Turnstile,
+            TwinOut: Dir("twin"),
+            CorpusOut: Dir("corpus"),
+            EngineSrc: null
+        );
+
+        new MachineGenerator(node, new PlacementFiles(), _tools).Generate(options);
+
+        node.Calls.Select(c => c.Script)
+            .Should()
+            .Equal(
+                Path.Combine(_tools, "generate-twin.mjs"),
+                Path.Combine(_tools, "generate-corpus.mjs")
+            );
+        node.Calls.Should().OnlyContain(c => !c.Args.Contains("--engine-src"));
+        File.Exists(Path.Combine(_root, "twin", "turnstile.machine.g.ts")).Should().BeTrue();
+        File.Exists(Path.Combine(_root, "corpus", "differential.json")).Should().BeTrue();
+    }
+
+    [Test]
+    public void Generate_twin_without_engine_src_or_a_bundled_engine_says_to_pass_engine_src()
     {
         var options = new MachineGenerateOptions(Turnstile, TwinOut: Dir("twin"), EngineSrc: null);
 
-        var generate = () => new MachineGenerator(new FakeNodeRunner()).Generate(options);
+        var generate = () =>
+            new MachineGenerator(
+                new FakeNodeRunner(),
+                new PlacementFiles(),
+                Dir("not-bundled")
+            ).Generate(options);
 
-        generate.Should().Throw<InvalidOperationException>().WithMessage("*--engine-src*");
+        generate
+            .Should()
+            .Throw<InvalidOperationException>()
+            .WithMessage("*none bundled*Pass --engine-src*");
     }
 
     [Test]
@@ -212,7 +242,10 @@ public class MachineGeneratorTests
 
         var generate = () => new MachineGenerator(node).Generate(Options(twinOut: Dir("twin")));
 
-        generate.Should().Throw<InvalidOperationException>().WithMessage("*node on PATH*");
+        generate
+            .Should()
+            .Throw<InvalidOperationException>()
+            .WithMessage("*node was not found on PATH*--node*");
     }
 
     [Test]
@@ -269,6 +302,70 @@ public class MachineGeneratorTests
             .GetFiles(irOut)
             .Should()
             .BeEmpty("check diffs against a temp copy, it must not place files");
+    }
+
+    [Test]
+    public void DefaultToolsDir_ignores_a_trailing_separator_of_either_kind()
+    {
+        var engine = Path.GetFullPath(Path.Combine("repo", "engine"));
+        var expected = Path.Combine(engine, "tools");
+
+        MachineGenerator
+            .DefaultToolsDir(Path.Combine(engine, "src") + Path.DirectorySeparatorChar)
+            .Should()
+            .Be(expected);
+        MachineGenerator
+            .DefaultToolsDir(Path.Combine(engine, "src") + Path.AltDirectorySeparatorChar)
+            .Should()
+            .Be(expected);
+    }
+
+    [Test]
+    public void DefaultToolsDir_of_a_filesystem_root_is_refused()
+    {
+        var root = Path.GetPathRoot(Path.GetFullPath("."))!;
+
+        var lookup = () => MachineGenerator.DefaultToolsDir(root);
+
+        lookup.Should().Throw<InvalidOperationException>().WithMessage("*no parent directory*");
+    }
+
+    [Test]
+    public void The_bundled_generators_sit_in_engine_beside_the_tool()
+    {
+        MachineGenerator
+            .BundledToolsDir.Should()
+            .Be(Path.Combine(AppContext.BaseDirectory, "engine"));
+    }
+
+    // The scripts come from --tools-dir, else the tools/ beside --engine-src, else the bundled copy.
+    [TestCase(true, true, "custom-tools")]
+    [TestCase(false, true, "engine/tools")]
+    [TestCase(false, false, "bundled")]
+    public void The_generators_run_from_the_first_place_that_names_them(
+        bool toolsDir,
+        bool engineSrc,
+        string expected
+    )
+    {
+        var node = new FakeNodeRunner();
+        var bundled = Dir("bundled");
+        var custom = Dir("custom-tools");
+        foreach (var dir in new[] { bundled, custom })
+            File.WriteAllText(Path.Combine(dir, "generate-twin.mjs"), "// placeholder");
+
+        new MachineGenerator(node, new PlacementFiles(), bundled).Generate(
+            new MachineGenerateOptions(
+                Turnstile,
+                TwinOut: Dir("twin"),
+                EngineSrc: engineSrc ? Path.Combine(_root, "engine", "src") : null,
+                ToolsDir: toolsDir ? custom : null
+            )
+        );
+
+        node.Calls.Single()
+            .Script.Should()
+            .Be(Path.Combine(_root, Path.Combine(expected.Split('/')), "generate-twin.mjs"));
     }
 
     [Test]

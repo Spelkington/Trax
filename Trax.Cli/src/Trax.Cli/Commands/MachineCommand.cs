@@ -316,7 +316,6 @@ internal static class MachineCommand
     {
         try
         {
-            ValidateImportStyle(importStyle);
             var machine = MachineLoader.Load(assemblyPath, machineName);
             var result = new MachineGenerator(node).Generate(
                 new MachineGenerateOptions(
@@ -325,7 +324,7 @@ internal static class MachineCommand
                     twinOut,
                     corpusOut,
                     engineSrc,
-                    importStyle ?? "relative",
+                    importStyle,
                     specifier,
                     toolsDir
                 )
@@ -360,7 +359,6 @@ internal static class MachineCommand
     {
         try
         {
-            ValidateImportStyle(importStyle);
             var machine = MachineLoader.Load(assemblyPath, machineName);
             var result = new MachineGenerator(node).Check(
                 new MachineGenerateOptions(
@@ -369,7 +367,7 @@ internal static class MachineCommand
                     twinOut,
                     corpusOut,
                     engineSrc,
-                    importStyle ?? "relative",
+                    importStyle,
                     specifier,
                     toolsDir
                 )
@@ -403,14 +401,6 @@ internal static class MachineCommand
             Console.Error.WriteLine(ex.Message);
             return 1;
         }
-    }
-
-    private static void ValidateImportStyle(string? importStyle)
-    {
-        if (importStyle is not null and not "relative" and not "specifier")
-            throw new InvalidOperationException(
-                $"--import-style must be 'relative' or 'specifier', got '{importStyle}'."
-            );
     }
 
     /// <summary>The options shared by <c>generate</c> and <c>check</c>. A fresh set per command, since a
@@ -455,25 +445,27 @@ internal static class MachineCommand
                 new Option<DirectoryInfo?>("--engine-src")
                 {
                     Description =
-                        "The TypeScript engine's src/ directory (required for the twin and corpus).",
+                        "Generate the twin and corpus from this engine checkout's src/ (and the tools/ beside it) instead of the engine bundled into trax.",
                 },
                 new Option<string?>("--import-style")
                 {
-                    Description = "Twin engine imports: 'relative' (default) or 'specifier'.",
+                    Description =
+                        "Twin engine imports: 'specifier' (default) or 'relative' (default with --engine-src, which it needs).",
                 },
                 new Option<string?>("--specifier")
                 {
                     Description =
-                        "Module specifier when --import-style specifier (default @trax/state-machine).",
+                        "Module specifier when --import-style specifier: an npm package name, optionally with a subpath (default @traxsharp/state-machine).",
                 },
                 new Option<DirectoryInfo?>("--tools-dir")
                 {
                     Description =
-                        "The engine's tools/ directory (default: sibling of --engine-src).",
+                        "The generators' directory (default: the tools/ beside --engine-src, else the ones bundled into trax). Needs --engine-src.",
                 },
                 new Option<string?>("--node")
                 {
-                    Description = "Path to the node executable (default: node).",
+                    Description =
+                        "The node executable: an absolute path, or a name looked up on PATH (default: node). Never resolved from the current directory; a relative path is refused, and on Windows so is a .cmd or .bat shim.",
                 }
             );
     }

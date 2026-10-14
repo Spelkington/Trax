@@ -127,7 +127,7 @@ against the one `RunsOnce` effect.
 | `Because(string message)` | The detail surfaced when the guard rejects the trigger. |
 | `Reduce(Func<JsonObject, JsonNode?, JsonObject> reducer)` | Computes the next context. Return a fresh JSON object; never mutate the input. |
 | `Reduce(Reduction reduce)` | The declarative, exportable reducer: `Set(...).FromInput(...)`, `Clear()`, `Reset()`, `Keep()`. See the [Rules vocabulary](/docs/sdk-reference/statemachine-api/rules). |
-| `RunsOnce<TEffect>(string? keyPrefix = null)` | Binds an `ISnapshotEffect` that runs exactly once when this transition is sent, keyed on `{keyPrefix}:{user}:{id}`. Omit `keyPrefix` and it defaults to `{machineId}:{trigger}`. Only the send fires this transition: an advance of its trigger is refused as `effect-bound`. A machine binds at most one. |
+| `RunsOnce<TEffect>(string? keyPrefix = null)` | Binds an `ISnapshotEffect` that runs exactly once when this transition is sent, keyed on `{keyPrefix}:{user}:{id}`. Omit `keyPrefix` and it defaults to `{machineId}:{trigger}`. On the server only the send fires this transition: an advance of its trigger through the draft service or `IMachineInstances.Advance` is refused as `effect-bound`. The engine's own `SnapshotMachine.Advance` and the TypeScript twin's `advance` do not refuse it and fire the edge like any other. A machine binds at most one. |
 | `To(TState state)` | The destination state. Also closes the transition, so you can chain another `On(...)`. |
 
 ## IDifferentialBuilder
@@ -144,7 +144,7 @@ raw `JsonObject` overloads give exact control.
 | `Sample<TInput>(TTrigger trigger, TInput input)` | A representative input for a trigger, from a typed record. |
 | `Sample(TTrigger trigger, JsonObject input)` | The same, as a raw JSON object. |
 | `EmptySample(TTrigger trigger)` | An empty (`{}`) input for a trigger, distinct from the always-added no-input case. |
-| `Seed<TContext>(TState state, TContext context)` / `Seed(TState state, JsonObject context)` | A seed context used as a BFS start point, reaching states the initial snapshot can't. |
+| `Seed<TContext>(TState state, TContext context)` / `Seed(TState state, JsonObject context)` | A seed context used as a BFS start point, reaching states the initial snapshot can't. A state may be seeded more than once, and the search starts from every seed, so each one's successors are in the corpus too. The same context twice for one state is refused at `Build`, naming the state. |
 | `Probe<TContext>(TContext context)` / `Probe(JsonObject context)` | A dense probe context crossed with every state, exercising guards and validators on unreachable-but-sendable snapshots. |
 | `OutcomeSample<TOutput>(TState invokingState, TOutput output)` | A representative output of the train the state invokes, fired as its `<State>.done` outcome trigger. Every outcome trigger is also fired with no input. `Build` refuses a sample for a state that invokes nothing. |
 

@@ -13,6 +13,7 @@ import type {
   RuleSource,
   ValueSchema,
 } from "./interpreter";
+import { irFormatVersion } from "./irFormat";
 import type { IrDocument } from "./irMachine";
 
 export function generateContextTypes(ir: IrDocument): string {
@@ -101,13 +102,19 @@ export function generateContextTypes(ir: IrDocument): string {
  *
  * - `"relative"` (default): three imports relative to the engine's own `src`
  *   (`../../machine`, `../../rules/irMachine`, `../../typed`). Right for a machine living inside this repo.
- * - `"specifier"`: one collapsed import from a module specifier (`@trax/state-machine` by default). Right for
- *   a consumer that vendors the engine behind a path alias, e.g. nwyc's `apps/web`. This replaces the
+ * - `"specifier"`: one collapsed import from a module specifier (`@traxsharp/state-machine` by default). Right for
+ *   a consumer that installs the package, or vendors the engine behind a path alias. This replaces the
  *   hard-coded string-`.replace()` rewrite consumers used to do by hand.
+ *
+ * A specifier twin runs on whichever engine the consumer installed, so its header names the import it was
+ * generated with and how to change it, and its IR carries `irFormat`, the IR format it was generated for, which
+ * the installed engine checks when the twin is imported (irFormat.ts). It imports nothing but
+ * `typedMachineFromIr` and `IrDocument`, which every release of the engine exports, so an older engine still
+ * loads it. A relative twin imports the very engine that generated it, and carries neither.
  */
 export interface MachineFactoryOptions {
   importStyle?: "relative" | "specifier";
-  /** The module specifier used when `importStyle` is `"specifier"`. Defaults to `@trax/state-machine`. */
+  /** The module specifier used when `importStyle` is `"specifier"`. Defaults to `@traxsharp/state-machine`. */
   specifier?: string;
   /**
    * SHA-256 of the machine's canonical IR (the committed `ir.json`). Emitted as an `irHash` export and passed
@@ -128,25 +135,37 @@ export function generateMachineFactory(
 ): string {
   const machine = pascal(ir.id);
   const importStyle = options.importStyle ?? "relative";
-  const specifier = options.specifier ?? "@trax/state-machine";
+  const specifier = options.specifier ?? "@traxsharp/state-machine";
   const irHash = options.irHash ?? "";
   // The differential block is test-only fuzzing data (samples/seeds/contexts); the runtime machine never
   // reads it. Strip it so the generated module stays lean and doesn't ship test inputs to the browser.
   const { differential: _differential, ...runtimeIr } = ir;
-  const engineImports =
-    importStyle === "specifier"
-      ? [`import { typedMachineFromIr, type IrDocument } from "${specifier}";`]
+  const specifierStyle = importStyle === "specifier";
+  const engineImports = specifierStyle
+      ? // JSON.stringify, so a specifier holding a quote stays one string literal rather than ending it.
+        [`import { typedMachineFromIr, type IrDocument } from ${JSON.stringify(specifier)};`]
       : [
           `import { typedMachineFromIr } from "../../typed";`,
           `import type { IrDocument } from "../../rules/irMachine";`,
         ];
+  // JSON.stringify keeps the specifier one line, so it cannot end the comment it is written into.
+  const importNote = specifierStyle
+    ? [
+        `// Imports the engine from ${JSON.stringify(specifier)} (trax machine generate --import-style specifier, the`,
+        "// default without --engine-src). Name another module with --specifier <module>, or import an engine",
+        "// checkout by relative path with --import-style relative --engine-src <engine/src>.",
+      ]
+    : [];
+  // The IR format rides in the IR rather than in a call, so an engine older than the check ignores it.
+  const twinIr = specifierStyle ? { irFormat: irFormatVersion, ...runtimeIr } : runtimeIr;
   return [
     `// AUTO-GENERATED from ${ir.id}.ir.json by generateMachineFactory. Do not edit by hand.`,
+    ...importNote,
     "",
     ...engineImports,
     `import type { ${machine}Spec } from "./${ir.id}.contexts.g";`,
     "",
-    `const ir = ${JSON.stringify(runtimeIr, null, 2)} as IrDocument;`,
+    `const ir = ${JSON.stringify(twinIr, null, 2)} as IrDocument;`,
     "",
     `/** SHA-256 of this machine's IR — the version-skew handshake token (matches C#'s IMachine.SchemaHash). */`,
     `export const irHash = ${JSON.stringify(irHash)};`,

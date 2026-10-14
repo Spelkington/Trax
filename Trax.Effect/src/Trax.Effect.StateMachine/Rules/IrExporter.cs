@@ -13,6 +13,16 @@ namespace Trax.Effect.StateMachine;
 public static class IrExporter
 {
     /// <summary>
+    /// The IR format this exporter writes: the contract the TypeScript engine reads it by. A twin generated with
+    /// specifier imports records it, and the installed <c>@traxsharp/state-machine</c> refuses a format it cannot
+    /// read. It is not written into the IR, so it moves no committed <c>ir.json</c> and no schema hash. Bump it,
+    /// with <c>irFormatVersion</c> in <c>Trax.Api.StateMachine/src/rules/irFormat.ts</c>, when the IR gains
+    /// something an engine reading the previous format would misread or ignore; <c>IrFormatParityTests</c> holds
+    /// the two equal.
+    /// </summary>
+    internal const int FormatVersion = 1;
+
+    /// <summary>
     /// Exports <paramref name="machine"/> as single-line canonical IR JSON (stable key order, so the output
     /// can be committed and hashed). The <c>invariants</c> and <c>differential</c> sections are emitted only
     /// when the machine declares them.
@@ -247,8 +257,11 @@ public static class IrExporter
         if (diff.Seeds.Count > 0)
         {
             var seeds = new JsonObject();
-            foreach (var (state, context) in diff.Seeds)
-                seeds[state.ToString()!] = context.DeepClone();
+            // One seed is written as the context itself and several as a list of them, so the IR of a machine that
+            // seeds each state once is the same as before a state could take more than one, and so is its hash.
+            foreach (var (state, contexts) in diff.Seeds)
+                seeds[state.ToString()!] =
+                    contexts.Count == 1 ? contexts[0].DeepClone() : Copy(contexts);
             obj["seeds"] = seeds;
         }
 

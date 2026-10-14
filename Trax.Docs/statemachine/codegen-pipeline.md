@@ -78,7 +78,10 @@ m.Differential(d => d
 - **Samples** are a few representative inputs per trigger; a no-input case is always added. A guard that accepts
   `quarter` or `dollar` wants one input that passes, one that fails, and an empty one.
 - **Seeds** are a representative valid context for a state no trigger reaches (context that arrives through
-  autosave rather than a transition). The initial state and everything reachable from it need none.
+  autosave rather than a transition). The initial state and everything reachable from it need none. A state may
+  take several seeds, one per context worth starting from, and the corpus expands each of them; the same context
+  twice for one state is refused at `Build`. A probe is different: it is crossed with every state once and never
+  expanded, so it checks guards and validators where it lands but reaches nothing beyond.
 - **Probes** and **outcome samples** cover snapshots a client could send but no walk reaches, and the outputs of an
   invoked train.
 
@@ -104,13 +107,24 @@ judgement call.
 One command runs the whole flow, [`trax machine generate`](/docs/reference/cli#trax-machine-generate): it exports the
 IR from the compiled machine in-process, then drives the engine's own generators to emit the twin and the corpus,
 each to its own output root. It reads only the IR it exports from the compiled machine, so there is no `machine.json`
-to edit.
+to edit. The generators ship inside the tool with the engine compiled in, so this needs only `node` (>= 22):
 
 ```bash
 trax machine generate --assembly ./bin/MyApp.dll \
-  --ir-out ./machines/checkout --twin-out ./web/src/app/checkout --corpus-out ./machines/checkout \
-  --engine-src ./vendor/state-machine/src
+  --ir-out ./machines/checkout --twin-out ./web/src/app/checkout --corpus-out ./machines/checkout
 ```
+
+The twin imports [`@traxsharp/state-machine`](/docs/sdk-reference/statemachine-api/typescript-package), which
+the frontend installs from npm. Its header says which import it was generated with and how to change it. The
+package and the tool need not be at the same version: every release bumps both, mostly for changes that leave the
+IR alone. What has to match is the **IR format**, the contract between the IR and the engine that reads it, which
+changes only when that contract does. A twin generated with specifier imports records the format in its IR, and the
+installed package checks it when the twin is imported: a format it cannot read throws on load, saying whether to
+upgrade the package or regenerate, rather than run a machine it would read differently. An engine released before
+the check ignores the field, and the twin imports nothing it lacks. A twin generated with relative imports reaches
+into the engine checkout that generated it and records no format. After upgrading the tool, regenerate:
+`trax machine check` fails on a twin left from the previous tool. What changed in `generate`'s defaults, and how
+to generate as before, is in [Regenerate twins after the trax machine generate defaults changed](/docs/migration-guides/trax-machine-generate-defaults).
 
 [`trax machine check`](/docs/reference/cli#trax-machine-check) regenerates to a temporary location and fails on any
 drift. Generate and check are the same code path, so a passing check means the committed artifacts match the source.
