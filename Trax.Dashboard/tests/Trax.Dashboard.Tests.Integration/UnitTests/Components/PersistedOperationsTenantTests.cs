@@ -24,7 +24,7 @@ namespace Trax.Dashboard.Tests.Integration.UnitTests.Components;
 
 /// <summary>
 /// The persisted-operations pages address a row by its tenant and its id, as the API's
-/// <c>operations.persistedOperations</c> fields do, and read and write through the
+/// <c>persistedOperations</c> fields do, and read and write through the
 /// <c>IPersistedOperationsService</c> those fields call (central ADR 0022). The primary key is
 /// <c>(tenant_key, id)</c>, so two rows may share an id; each must open, and change, only
 /// itself. The list is read one page at a time from the server rather than capped. The host here
@@ -48,8 +48,12 @@ public class PersistedOperationsTenantTests
     private const string DefaultDocument = "query Greet { defaultTenantField }";
     private const string TenantDocument = "query Greet { acmeTenantField }";
 
+    private const string ManagerRole = "Deployer";
+    private const string ManagePolicy = "ManagePersistedOperations";
+
     private Bunit.TestContext _ctx = null!;
     private InMemoryDataContextFactory _data = null!;
+    private TestAuthorizationContext _auth = null!;
 
     [SetUp]
     public void SetUp()
@@ -61,7 +65,11 @@ public class PersistedOperationsTenantTests
 
         var services = _ctx.Services;
         services.AddLogging();
-        services.AddPersistedOperationStore(store => store.SingleNode());
+        // The operator meets the management gate: the dashboard checks it as the API does.
+        _auth = _ctx.AddTestAuthorization();
+        _auth.SetAuthorized("operator");
+        _auth.SetRoles(ManagerRole);
+        UseStore(store => store.SingleNode().GateManagement(roles: ManagerRole));
         // Wrap the package's own service, so a test can see that the pages called it.
         var registered = services.Single(d => d.ServiceType == typeof(IPersistedOperationsService));
         services.Remove(registered);
@@ -236,6 +244,99 @@ public class PersistedOperationsTenantTests
         rows.Should().ContainSingle();
         rows[0].TenantKey.Should().Be("acme", Adr);
         rows[0].Id.Should().Be(SharedId);
+    }
+
+    [Test]
+    public async Task Without_a_management_gate_the_dashboard_cannot_upload()
+    {
+        // Documents managed out of band: the host turns on the store and declares no gate.
+        UseStore(store => store.SingleNode());
+
+        var list = _ctx.RenderComponent<PersistedOperationsPage>();
+        list.WaitForAssertion(
+            () => list.Markup.Should().Contain("management is not served on this server"),
+            Wait
+        );
+        list.Markup.Should().NotContain("Upload", "the API serves no management fields here");
+
+        var editor = _ctx.RenderComponent<PersistedOperationEditor>();
+        await UploadAsync(editor);
+
+        editor.WaitForAssertion(
+            () => editor.Markup.Should().Contain("not authorized to manage persisted operations"),
+            Wait
+        );
+        (await ReadRowsAsync()).Should().BeEmpty("without a gate no surface manages documents");
+        _ctx.Services.GetRequiredService<ScriptedPersistedOperationsService>()
+            .Calls.Should()
+            .NotContain("UploadAsync");
+    }
+
+    [Test]
+    public async Task An_operator_without_the_management_policy_cannot_upload()
+    {
+        UseStore(store => store.SingleNode().GateManagement(policy: ManagePolicy));
+
+        var editor = _ctx.RenderComponent<PersistedOperationEditor>();
+        await UploadAsync(editor);
+
+        editor.WaitForAssertion(
+            () => editor.Markup.Should().Contain("not authorized to manage persisted operations"),
+            Wait
+        );
+        (await ReadRowsAsync())
+            .Should()
+            .BeEmpty("the operator meets the dashboard's posture but not the management gate");
+
+        _auth.SetPolicies(ManagePolicy);
+        await editor.Find("button:contains('Save')").ClickAsync(new());
+
+        (await ReadRowsAsync()).Should().ContainSingle("once the policy is met the upload goes");
+    }
+
+    [Test]
+    public async Task An_operator_who_loses_the_management_role_cannot_page_the_list()
+    {
+        await SeedAsync(
+            Enumerable.Range(0, 60).Select(i => Row(null, $"op{i}.v1", "query Q { a }")).ToArray()
+        );
+        var page = _ctx.RenderComponent<PersistedOperationsPage>();
+        RadzenDataGrid<PersistedOperationDto> grid = null!;
+        page.WaitForAssertion(
+            () =>
+            {
+                grid = page.FindComponent<RadzenDataGrid<PersistedOperationDto>>().Instance;
+                grid.Count.Should().Be(60);
+            },
+            Wait
+        );
+        var calls = _ctx.Services.GetRequiredService<ScriptedPersistedOperationsService>().Calls;
+        var reads = calls.Count(c => c == "ListAsync");
+
+        // The role is taken away while the circuit lives; GraphQL refuses the next request.
+        _auth.SetRoles("Reader");
+        await page.InvokeAsync(() => grid.GoToPage(1));
+
+        page.WaitForAssertion(
+            () => page.Markup.Should().Contain("You do not meet this server's persisted-operation"),
+            Wait
+        );
+        calls
+            .Count(c => c == "ListAsync")
+            .Should()
+            .Be(reads, "every page read checks the management gate again" + Adr);
+    }
+
+    // Registered last, so its options are the ones the service and the gate resolve.
+    private void UseStore(
+        Action<Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationStoreBuilder> configure
+    ) => _ctx.Services.AddPersistedOperationStore(configure);
+
+    private static async Task UploadAsync(IRenderedComponent<PersistedOperationEditor> editor)
+    {
+        editor.Find("input[name='PersistedOperationId']").Change(SharedId);
+        editor.Find("textarea").Change(DefaultDocument);
+        await editor.Find("button:contains('Save')").ClickAsync(new());
     }
 
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);

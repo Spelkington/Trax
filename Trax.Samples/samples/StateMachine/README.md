@@ -103,8 +103,9 @@ which is what makes the migration load-bearing.
 
 ## Web frontend
 
-A React app in [web/](web/) drives both machines through these mutations with a machine-agnostic transport
-and a `useMachine` hook. Start this host, then `cd web && npm install && npm run dev` and open
+A React app in [web/](web/) drives both machines through the client `trax client` generated from this host's
+manifest: `useRememberedTurnstile` and `useRememberedCheckout` keep each user's instance, and every request is sent
+by the persisted id the host registered. Start this host, then `cd web && npm install && npm run dev` and open
 http://localhost:5173. The host allows that origin only, so Vite refuses to start rather than move to
 another port while a different sample's client holds 5173.
 
@@ -112,8 +113,8 @@ The page teaches the machine before the example. Each machine has a tab: the tur
 machine, then the checkout, a machine with an effect. The page starts each machine once per user and keeps the id
 the server minted in the browser, so a reload resumes the same instance. A state diagram follows every move and
 marks the moves out of the current state, and every trigger can be sent from any state, so pressing one with no
-arrow shows the server's `no-transition`. **What the server just did** lists the checks the server made for the
-last request, in the order it makes them, and where it stopped (`guard-failed` for a penny, or for **Next** from an
+arrow shows the server's `NO_TRANSITION`. **What the server just did** lists the checks the server made for the
+last request, in the order it makes them, and where it stopped (`GUARD_FAILED` for a penny, or for **Next** from an
 empty cart). On the checkout, **Fill the cart** sends `AddItem`, and **Side effect: the charge** shows the
 `RunsOnce<ICharge>` binding, the whole request the page sends to pay (only the draft's id), and the payment
 provider's own list of charges, which grows by one on Pay and not at all on a second Pay. **Show the raw requests**

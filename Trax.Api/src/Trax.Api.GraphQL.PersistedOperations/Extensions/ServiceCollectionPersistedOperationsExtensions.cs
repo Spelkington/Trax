@@ -43,7 +43,7 @@ public static class ServiceCollectionPersistedOperationsExtensions
 
         var storeBuilder = new PersistedOperationStoreBuilder();
         configure(storeBuilder);
-        return AddStore(services, storeBuilder.Build());
+        return AddStore(services, storeBuilder.Build(), storeBuilder.ManagementGate);
     }
 
     /// <summary>
@@ -83,16 +83,26 @@ public static class ServiceCollectionPersistedOperationsExtensions
 
     private static IServiceCollection AddStore(
         IServiceCollection services,
-        string? rabbitMqInvalidationConnectionString
+        string? rabbitMqInvalidationConnectionString,
+        IReadOnlyList<Trax.Effect.Attributes.TraxAuthorizeAttribute> managementGate
     )
     {
-        var builder = new PersistedOperationsBuilder();
+        var builder = new PersistedOperationsBuilder().AddManagementGate(managementGate);
         if (rabbitMqInvalidationConnectionString is null)
             builder.SingleNode();
         else
             builder.UseRabbitMqInvalidation(rabbitMqInvalidationConnectionString);
 
-        services.AddSingleton(builder.Build());
+        // One set of options per process. Without UsePersistedOperations they are the last store
+        // call's; with it they are UsePersistedOperations', whichever comes first: it replaces
+        // this registration, and this one is skipped when its options are already there. Its
+        // startup check refuses a store gate that differs from its own.
+        services.AddSingleton(
+            new Startup.PersistedOperationStoreDeclaration(builder.Build(), managementGate)
+        );
+        services.TryAddSingleton(sp =>
+            sp.GetServices<Startup.PersistedOperationStoreDeclaration>().Last().Options
+        );
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<PersistedOperationCacheGeneration>();
 
@@ -120,6 +130,10 @@ public static class ServiceCollectionPersistedOperationsExtensions
         services.TryAddSingleton<
             Services.IPersistedOperationsService,
             Services.PersistedOperationsService
+        >();
+        services.TryAddScoped<
+            Services.IPersistedOperationsManagementGate,
+            Services.PersistedOperationsManagementGate
         >();
 
         return services;

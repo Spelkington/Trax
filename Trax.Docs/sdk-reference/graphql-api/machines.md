@@ -1,6 +1,6 @@
 ---
 title: Machines root
-description: "Reference for the machines GraphQL root: each exposed state machine served as its own typed start, events, discard and get, and machineChanged."
+description: "Reference for the machines GraphQL root: each exposed state machine served as its own typed start, events, discard and get, and its push."
 type: reference
 area: api
 surface: graphql
@@ -30,17 +30,17 @@ Moving a client off the generic `stateMachine` mutations, which are no longer se
 | --- | --- | --- | --- |
 | `machines` | both | none | The namespace of every exposed machine. It and each machine's field group operations, so the [operation cap](/docs/sdk-reference/graphql-api/add-trax-graphql) counts the operations under them, not them. |
 | `machines.<machine>` | both | none | One field per exposed machine, named from its kebab-case id in camelCase (`topic-map` is `topicMap`). |
-| `start` | mutation | `input: <StartInput>!`, `requestId: String!` | Creates an instance for the caller from the machine's declared start. The server mints the id. `input` is the record `Start<TStartInput>` declares, never the context type, and is left out when that record has no field. A retry with the same `requestId` and input answers with the same instance; the same `requestId` with another input is `request-id-reused`. |
+| `start` | mutation | `input: <StartInput>!`, `requestId: String!` | Creates an instance for the caller from the machine's declared start. The server mints the id. `input` is the record `Start<TStartInput>` declares, never the context type, and is left out when that record has no field. A retry with the same `requestId` and input answers with the same instance; the same `requestId` with another input is `REQUEST_ID_REUSED`. |
 | `<event>` | mutation | `id: UUID!`, `input: <Input>!`, `requestId: String!`, `clientResult: String` | Sends one client event, named from its trigger in camelCase (`CancelBuild` is `cancelBuild`). `input` is the record the event's `WithInput<T>()` declares, and is absent for an event declared without one: never a JSON scalar. |
 | `<effect event>` | mutation | `id: UUID!`, `requestId: String!` | An event bound to the machine's `RunsOnce` effect. The server runs the effect, once per instance however many retries arrive with one `requestId`, and records its result; the client sends no input, and no `clientResult`, since it cannot predict the effect's receipt. |
-| `discard` | mutation | `id: UUID!`, `requestId: String!` | Deletes the caller's instance, held to the machine's `Discard(...)` rule. A missing id, and another user's, answers `discarded: true`. A row the server put in its state (an effect's record, an invoked train's outcome, an event gated by `Requires` or `RequiresPolicy`, carried on by a timer), an instance in an invoking state, and one with an effect pending on it are refused as `discard-not-allowed` and kept. Answers `MachineDiscardResult { id discarded problem }`. |
+| `discard` | mutation | `id: UUID!`, `requestId: String!` | Deletes the caller's instance, held to the machine's `Discard(...)` rule. A missing id, and another user's, answers `discarded: true`. A row the server put in its state (an effect's record, an invoked train's outcome, an event gated by `Requires` or `RequiresPolicy`, carried on by a timer), an instance in an invoking state, and one with an effect pending on it are refused as `DISCARD_NOT_ALLOWED` and kept. Answers `MachineDiscardResult { id discarded problem }`. |
 | `get` | query | `id: UUID!` | The caller's instance, or null. Another user's id, and one the machine's `Get` rule refuses the caller, read exactly as an unknown id. |
 
 An outcome of an invoked train and a timer have no field: only the server fires them.
 
 Every operation field carries `@authorize`, so an anonymous caller is refused before any resolver runs. Each event's
 own rule (`Requires`, `RequiresPolicy`, `AnyAuthenticated`) is checked below the field, where every surface meets,
-and a caller it refuses is answered with the problem `forbidden`, not an error.
+and a caller it refuses is answered with the problem `FORBIDDEN`, not an error.
 
 ### Answers
 
@@ -54,12 +54,13 @@ Every operation but `discard` answers with the machine's `<Machine>MachineResult
 | `context` | `<Machine>MachineContext` | Every field any state's context record declares, by its JSON name, each nullable: a field the state the instance is in does not hold is null. Absent for a machine whose states declare no context record. |
 | `dueAt` | `DateTime` | When the timer of the state the instance is in fires, from the row's `due_at`, or null when that state has no timer or the server cleared it. Every answer carries it, `start` and `get` included, beside the snapshot and never inside it. |
 | `dueAtKnown` | `Boolean!` | False when the answer replays a request the instance has moved past since: the server records a request's result, not its due time, so `dueAt` is null and means nothing. Treat `dueAt` as absent then. True on every other answer. |
+| `invokedRun` | `MachineInvokedRun` | On a machine with a state that invokes a train: `{ runId }`, the external id of the run the instance's current state queued, while it sits in that state; null in any other state, on a refusal, and for anyone but the instance's user owner. The owner follows the run with [`runProgress`](/docs/sdk-reference/graphql-api/run-progress). Read from the row when the answer is resolved, so a replayed answer shows where the instance is now. |
 | `problem` | `SnapshotProblem` | `{ code message }` when the operation was refused, else null. When it is set, nothing was written. |
 
 A refusal is data. The codes are those of the [result codes](/docs/sdk-reference/statemachine-api/result-codes):
-`invalid-input`, `guard-failed` (its message is the guard's `Because` text), `no-transition`, `forbidden`,
-`request-id-reused`, `invalid-request-id`, `client-divergence`, `too-large`, `not-found` and the rest. A failure the
-server did not expect, such as the database going away, is `internal-error` with a fixed message and a reference
+`INVALID_INPUT`, `GUARD_FAILED` (its message is the guard's `Because` text), `NO_TRANSITION`, `FORBIDDEN`,
+`REQUEST_ID_REUSED`, `INVALID_REQUEST_ID`, `CLIENT_DIVERGENCE`, `TOO_LARGE`, `NOT_FOUND` and the rest. A failure the
+server did not expect, such as the database going away, is `INTERNAL_ERROR` with a fixed message and a reference
 the server logs the failure under; the answer carries no exception text, SQL or host.
 
 ## Behavior
@@ -76,14 +77,32 @@ The input types are the CLR records, named as HotChocolate names them (`WizardSt
 however many machines and trains take one record. Their fields, and the context's, carry the record's JSON names:
 camelCase, or the `[JsonPropertyName]` a property declares (`note_text`). A `TimeSpan` crosses as the ISO-8601
 duration a timer reads (`"PT5M"`), both in an input and in the context, so a timer whose duration the context holds is
-armed from a typed event. The types the root generates carry the
+armed from a typed event. An enum a machine's context, start input or event inputs hold is spelled as the server
+stores it, the C# member name (`HighPriority`), not HotChocolate's `HIGH_PRIORITY`: the twin applies an input as the
+client sends it, so it predicts what the server stores only when the two spellings are one. HotChocolate gives a CLR
+enum one GraphQL type, so any field outside the `machines` root that carries the same enum would see the same values:
+a train's, a query model's or a type extension's. The host refuses to start, naming the enum and the field, unless it
+accepts the new spelling with [`ShareEnumWithMachines<TEnum>()`](/docs/sdk-reference/graphql-api/add-trax-graphql).
+An enum declared in a Trax assembly, such as `TrainState`, is never shared, since Trax's own fields
+(`TrainLifecycleEvent.trainState`, the `operations` filters) carry it: a machine that holds one refuses the start,
+naming the enum, whether or not the host called `ShareEnumWithMachines` for it, and the call itself throws. Give the
+machine its own enum. Trax tells its own assemblies by name: one named `Trax` or `Trax.*` counts as Trax's, so a
+consumer assembly named `Trax.Billing` has its enums refused the same way. The samples (`Trax.Samples.*`) and test
+projects (a `Tests` segment) count as consumer code. A GraphQL enum type the host binds
+to such an enum itself refuses the start too. So does a member whose stored name is not a GraphQL name, is `true`,
+`false` or `null`, or starts with `__`. Only `System` and the namespaces under it are treated as the framework's; a
+record in `Systematic.Orders` is walked like any other. An enum held inside a class deriving from a list, a dictionary or a tuple
+is reached too. The types the root generates carry the
 machine's name and the word `Machine` (`TopicMapMachineState`, `TopicMapMachineContext`, `TopicMapMachineResult`,
-`TopicMapMachineMutations`, `TopicMapMachineQueries`), so a CLR type the schema already holds, such as a machine's
+`TopicMapMachineChange`, `TopicMapMachineMutations`, `TopicMapMachineQueries`), so a CLR type the schema already holds, such as a machine's
 own state enum a train returns, keeps its name.
 
 The host refuses to build the schema, naming both, when two exposed machines' ids give one field (`map-2d` and
-`map2d`), when two events of a machine give one field, and when an event is named `start`, `discard` or `get`. A
-host's own field named `machines` on either root is refused at startup. Two registered machine types with one id,
+`map2d`), when two events of a machine give one field, and when an event is named `start`, `discard`, `get` or
+`changed`. A
+host's own field named `machines` on either root is refused at startup, and so is a machine whose push field lands on a
+subscription field already there (a machine `on-train-state` on Trax's `onTrainStateChanged`, or `order` on a host's
+own `orderChanged`). Two registered machine types with one id,
 served or not, refuse the host's start too, naming both: a subclass has its base's id, so a host serving a machine
 through a marked subclass registers only the subclass
 ([AddStateMachines](/docs/sdk-reference/statemachine-api/add-state-machines#serving-a-machine)).
@@ -100,7 +119,7 @@ Each write dispatches the internal train it stands for through the mediator, as 
 path every surface shares, and the machine's rules and input validation run below it. Those internal trains are
 never published on the lifecycle subscriptions, whatever the host streams, and no lifecycle hook receives their
 output: the broadcaster (RabbitMQ) and SignalR carry their runs' state changes with `output` null, so an instance's
-context reaches its owner only through `get` and `machineChanged`. Their runs are recorded as any other train's.
+context reaches its owner only through `get` and its push. Their runs are recorded as any other train's.
 
 - **One write per operation.** The fields under a namespace resolve in parallel, so an operation that selects more
   than one `start`, `discard` or event, on one machine or several, is refused at validation with
@@ -108,27 +127,30 @@ context reaches its owner only through `get` and `machineChanged`. Their runs ar
 - **Reads share the request's data context.** `get` reads through the machine's draft service in the request's
   scope, one read of a request at a time, so two aliased `get`s are safe.
 - **`requestId` is required** on `start`, `discard` and every event: 1 to 200 characters, not blank, with no control
-  character (C0, DEL or C1) and no unpaired surrogate, or the answer is `invalid-request-id` and nothing runs. Two copies of one request racing each other answer with one result.
-- **Input is bounded.** An input or a `clientResult` larger than 64 KiB is `too-large` before it is parsed.
+  character (C0, DEL or C1) and no unpaired surrogate, or the answer is `INVALID_REQUEST_ID` and nothing runs. Two copies of one request racing each other answer with one result.
+- **Input is bounded.** An input or a `clientResult` larger than 64 KiB is `TOO_LARGE` before it is parsed.
 - **Sensitive input is masked.** A field the input record marks `[TraxSensitive]`, or one whose type reaches a
   marked member, travels to the train in `AdvanceSnapshotInput.SensitiveInput` (`StartSnapshotInput.SensitiveInput`
   for a start), which every recorded copy of the run's input writes as `{"_redacted": true}`.
 - **`clientResult`** is the canonical snapshot the client's twin predicts for the event. A different result is
-  refused as `client-divergence`, nothing is written, and the `trax.machine.client_divergence` meter counts it; the
+  refused as `CLIENT_DIVERGENCE`, nothing is written, and the `trax.machine.client_divergence` meter counts it; the
   server logs only its length and SHA-256 hash. It is compared canonically, with a null member equal to an absent
   one, so a prediction rebuilt from a typed answer matches. A retried request is compared with the result recorded
   for it.
 
-### machineChanged
+### The push
 
-`subscription { machineChanged(machine: "topic-map", id: "...") { rowId revision state context dueAt gone reload problem { code message } } }`
+`subscription { topicMapChanged(id: "...") { rowId revision state context { ... } dueAt dueAtKnown gone reload problem { code message } } }`
 pushes the caller's instance whenever any path on any host writes it: a step from another tab, an invoked train's
-outcome applied on another node, a recovery. Over the socket only, by its persisted id when persisted operations are
-on.
+outcome applied on another node, a recovery. Each exposed machine has its own field, named from its id
+(`topic-map` is `topicMapChanged`), and its events are typed as the machine's `get` answers: the state as the
+machine's state enum, the context as its context type, field for field, with `dueAtKnown` (always true on a push)
+beside `dueAt`. An event that ends the stream carries no state and no context. Over the socket only, by its persisted
+id when persisted operations are on.
 
 - **Verified once, routed by row.** The user key is the socket's principal (the host's `ISnapshotPrincipal`), never
   an argument, and the machine's `Watch` rule is checked once, at subscribe. A missing id, another user's, a system
-  instance's and one the rule refuses all get the same answer: one event with the problem `not-found`, then the end.
+  instance's and one the rule refuses all get the same answer: one event with the problem `NOT_FOUND`, then the end.
   The stream then follows the row's `row_id`, so a row deleted and created again under the same id never reaches it.
 - **Order.** The watch registers before the instance is read, and the first event is the instance as it is then.
   Each later event is a newer revision, whole, migrated and validated as `get` reads it; a burst may arrive as its
@@ -137,10 +159,10 @@ on.
   does not set it today. An event's `dueAt` is always the row's: null means the state has no timer, or the server
   cleared it while the instance stayed in it.
 - **The end.** A delete or an expiry ends the stream with `gone: true`. A row written by a newer version of the
-  machine than the node runs ends it with `client-outdated` (reload); one the node cannot read otherwise ends it with
+  machine than the node runs ends it with `CLIENT_OUTDATED` (reload); one the node cannot read otherwise ends it with
   the rehydration code. Ending one stream ends no other. A stream also ends with its socket's credential.
 - **Caps.** One principal holds at most 10 streams on one instance and 2,000 in all on a node; past either the
-  answer is `too-many-subscriptions`, and a stream that ends frees its place. Each stream holds one of its socket's
+  answer is `TOO_MANY_SUBSCRIPTIONS`, and a stream that ends frees its place. Each stream holds one of its socket's
   100 operations.
 - **Cost.** A node holds one listening session however many streams it serves, and reads a written row once per
   burst of notices, only when something on the node watches it
@@ -158,8 +180,8 @@ persisted operations serves its machines with no upload, and an ad-hoc machine d
 transport like any other.
 
 - **What is registered.** After the schema builds, and before the host serves anything, one document per operation:
-  `start`, `discard`, every client event, `get` and `machineChanged` (never an outcome or a timer). The
-  `machineChanged` document names its machine, so it takes only `$id`. A document takes its values as
+  `start`, `discard`, every client event, `get` and the push, registered as `changed` (never an outcome or a
+  timer). The push document takes only `$id`. A document takes its values as
   variables named like its field's arguments (`input`, `requestId`, `id`, `clientResult`) and selects every field of
   the answer. Its text is built from the schema alone, so every process building one schema writes the same bytes.
 - **The id** is `trax_machine_<machine>_<operation>_<irHash><textHash>`: the machine's id, the operation's field,
@@ -173,34 +195,42 @@ transport like any other.
   machine's documents is numbered (the row's `version`) one past every set stored before it.
 - **A lookup verifies** the stored body against its id. A body that does not hash to its id is refused, logged and
   counted on `trax.persisted_operations.machine_document_mismatches`.
-- **Each node runs only its own documents.** An id of an older set answers `client-outdated` (the client reloads);
-  an id of a newer set, registered by a node running a newer version, answers `server-outdated` (retry: another node
+- **Each node runs only its own documents.** An id of an older set answers `CLIENT_OUTDATED` (the client reloads);
+  an id of a newer set, registered by a node running a newer version, answers `SERVER_OUTDATED` (retry: another node
   may run it). Both are GraphQL errors whose `extensions.code` is the code, and neither runs anything. Neither is a
-  server error: `client-outdated` is HTTP 400 and `server-outdated` 409, so a load balancer counting 5xx answers does
+  server error: `CLIENT_OUTDATED` is HTTP 400 and `SERVER_OUTDATED` 409, so a load balancer counting 5xx answers does
   not count them, and a client reads the code, not the status. An id of a machine this node does not serve is
-  answered from the store: `server-outdated` while the store holds it active (a node may serve it), `client-outdated`
-  once it was collected. An id that is not shaped like a generated one answers `client-outdated` without a read. An
+  answered from the store: `SERVER_OUTDATED` while the store holds it active (a node may serve it), `CLIENT_OUTDATED`
+  once it was collected. An id that is not shaped like a generated one answers `CLIENT_OUTDATED` without a read. An
   id this node has not seen is answered at once from its last read of the store, never by waiting for one: until a
-  read that began after the id was first asked for has finished, it answers `server-outdated`, and once such a read
-  does not hold it, `client-outdated`. The store is read again in the background, at most once a second however many
+  read that began after the id was first asked for has finished, it answers `SERVER_OUTDATED`, and once such a read
+  does not hold it, `CLIENT_OUTDATED`. The store is read again in the background, at most once a second however many
   such ids arrive, and the ids waiting for a read are bounded (4096), the oldest forgotten first: a flood of more
-  made-up ids than that within a second keeps a real stale client on `server-outdated` until the flood stops. A document id's machine is
+  made-up ids than that within a second keeps a real stale client on `SERVER_OUTDATED` until the flood stops. A document id's machine is
   the segment between the `trax_machine_` prefix and the next underscore; a machine id never contains one.
-- **Older documents are collected** once a node's own set has been stored for
+- **A version is collected once no node registers it.** Each running node registers its documents again every
+  hour (or every quarter of the grace period, if that is shorter), under the same lock, and each registration writes
+  the `updated_at` of the node's own documents again once it is a quarter of the grace period old. A version of a
+  machine the node serves, older or newer than its own, that no node has registered for
   [`KeepOlderMachineDocumentsFor`](/docs/sdk-reference/persisted-operations/persisted-operations-builder) (seven
-  days by default). Each running node registers its documents again every hour, under the same lock, and that is
-  when it collects: a node starting inside the grace period deactivates nothing, and an older set is collected
-  within the hour after the grace period ends, with no restart. A registration also marks the active documents of a
-  machine the registering node does not serve as unexposed (their deprecation reason starts `unexposed:`), and a
-  node that serves the machine clears the mark when it registers, so a machine any running node serves is never
-  collected; one still marked after the grace period is collected, and its clients then reload. A collected document
-  is made active again only when a node serving it starts (a rollback) or when no newer version of its machine is
-  stored, so a node still running an older version past the grace period does not bring back what a newer one
-  collected. A node that serves no machine registers too, with no documents of its own, so a deploy that stops
+  days by default) plus that quarter is collected, with no restart. After a rolling deploy the older version goes;
+  after a rollback the newer one goes, and its ids then answer `CLIENT_OUTDATED`, so its clients reload rather than
+  retry. A node still running another version keeps its documents for as long as it runs, so two hosts on one
+  database that serve two versions of one machine keep both. The time is counted from no earlier than the
+  registering node's own version last became active (first stored, or restored after a rollback), so a node starting
+  inside the grace period deactivates nothing.
+  A registration also marks the active documents of a machine the registering node does not serve as unexposed
+  (their deprecation reason starts `unexposed:`), and a node that serves the machine clears the mark when it
+  registers, so a machine any running node serves is never collected; one still marked after the grace period is
+  collected, and its clients then reload. A node makes its own collected documents active again whenever it
+  registers them. Only rows a host generated take part: a row under a reserved prefix whose body does not hash
+  to its id, such as one uploaded before the prefix was reserved, is never numbered against, marked or collected.
+  A node that serves no machine registers too, with no documents of its own, so a deploy that stops
   serving every machine still collects the older documents after the grace period; a registration that fails there
   is logged and tried again an interval later, and does not stop the host.
-- **The manifest** is `operations { machineDocuments { id machine operation irHash document } }`, behind the
-  operations gate: the documents this node serves, which a client reads at build time.
+- **The manifest** is the [client manifest](/docs/sdk-reference/statemachine-api/client-manifest) the host
+  exports with `--trax-export-client`: every document this node serves, which a client reads at build time. It is
+  written by the code that registers the documents, so its ids are the ones the host serves.
 
 The id carries the IR hash, so the typed surface needs no `schemaHash`: the optional handshake stays on the generic
 mutations only.

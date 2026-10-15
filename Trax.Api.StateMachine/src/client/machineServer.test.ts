@@ -34,7 +34,7 @@ const DOCUMENTS: MachineDocument[] = [
   doc('coin', '$id: UUID!, $input: CoinInput!, $requestId: String!, $clientResult: String'),
   doc('push', '$id: UUID!, $requestId: String!, $clientResult: String'),
   doc('get', '$id: UUID!'),
-  doc('machineChanged', '$id: UUID!'),
+  doc('changed', '$id: UUID!'),
 ];
 
 interface Sent {
@@ -71,11 +71,16 @@ class FakeSocket implements PersistedSubscriptionSocket {
   }
 
   push(change: Record<string, unknown>) {
-    this.last.sink.next({ data: { machineChanged: { reload: false, gone: false, problem: null, ...change } } });
+    this.last.sink.next({ data: { turnstileChanged: { reload: false, gone: false, problem: null, ...change } } });
   }
 }
 
-const serverOver = (fetch: typeof globalThis.fetch, socket = new FakeSocket(), resubscribeDelays?: number[]) => ({
+const serverOver = (
+  fetch: typeof globalThis.fetch,
+  socket = new FakeSocket(),
+  resubscribeDelays?: number[],
+  terminalStreamErrors?: string[],
+) => ({
   socket,
   server: createMachineServer('/graphql', {
     fetch,
@@ -83,8 +88,12 @@ const serverOver = (fetch: typeof globalThis.fetch, socket = new FakeSocket(), r
     documents: DOCUMENTS,
     socket,
     resubscribeDelays,
+    terminalStreamErrors,
   }),
 });
+
+// An error the way a generated client's stale server errors a stream: a TraxOperationError with a code.
+const refusal = (code: string, message: string) => Object.assign(new Error(message), { name: 'TraxOperationError', code });
 
 describe('createMachineServer operations', () => {
   it('starts by the start document, and answers the snapshot beside its revision and due time', async () => {
@@ -158,24 +167,24 @@ describe('createMachineServer operations', () => {
   });
 
   it('answers a refusal as a problem, never a rejection', async () => {
-    const { fetch } = http(answer('push', { id: 'i-1', problem: { code: 'forbidden', message: 'Operator only.' } }));
+    const { fetch } = http(answer('push', { id: 'i-1', problem: { code: 'FORBIDDEN', message: 'Operator only.' } }));
     const { server } = serverOver(fetch);
 
     expect(await server.event({ id: 'i-1', trigger: 'Push', requestId: 'rq-1' })).toEqual({
       kind: 'problem',
-      code: 'forbidden',
+      code: 'FORBIDDEN',
       message: 'Operator only.',
     });
   });
 
   it('answers a document of another version as a problem, and rejects any other GraphQL error', async () => {
     const { fetch } = http(
-      { errors: [{ message: 'Reload.', extensions: { code: 'client-outdated' } }] },
+      { errors: [{ message: 'Reload.', extensions: { code: 'CLIENT_OUTDATED' } }] },
       { errors: [{ message: 'Not authorized.' }] },
     );
     const { server } = serverOver(fetch);
 
-    expect(await server.get('i-1')).toEqual({ kind: 'problem', code: 'client-outdated', message: 'Reload.' });
+    expect(await server.get('i-1')).toEqual({ kind: 'problem', code: 'CLIENT_OUTDATED', message: 'Reload.' });
     await expect(server.get('i-1')).rejects.toThrow('Not authorized.');
   });
 
@@ -183,7 +192,7 @@ describe('createMachineServer operations', () => {
     const { sent, fetch } = http(answer('get', null));
     const { server } = serverOver(fetch);
 
-    expect(await server.get('i-9')).toMatchObject({ kind: 'problem', code: 'not-found' });
+    expect(await server.get('i-9')).toMatchObject({ kind: 'problem', code: 'NOT_FOUND' });
     expect(sent).toEqual([{ id: `trax_machine_turnstile_get_${hash}`, variables: { id: 'i-9' } }]);
   });
 
@@ -195,33 +204,33 @@ describe('createMachineServer operations', () => {
     expect(sent).toEqual([{ id: `trax_machine_turnstile_discard_${hash}`, variables: { id: 'i-1', requestId: 'rq-d' } }]);
   });
 
-  it('refuses at creation a document set without the machineChanged document', () => {
+  it('refuses at creation a document set without the push document', () => {
     expect(() =>
       createMachineServer('/graphql', {
         fetch: http().fetch,
         machine: turnstile,
-        documents: DOCUMENTS.filter((d) => d.operation !== 'machineChanged'),
+        documents: DOCUMENTS.filter((d) => d.operation !== 'changed'),
         socket: new FakeSocket(),
       }),
-    ).toThrow(/machineChanged/);
+    ).toThrow(/changed/);
   });
 });
 
 describe('createMachineServer change stream', () => {
-  const follow = (resubscribeDelays?: number[]) => {
-    const { server, socket } = serverOver(http().fetch, new FakeSocket(), resubscribeDelays);
+  const follow = (resubscribeDelays?: number[], terminalStreamErrors?: string[]) => {
+    const { server, socket } = serverOver(http().fetch, new FakeSocket(), resubscribeDelays, terminalStreamErrors);
     const messages: StreamMessage[] = [];
     const close = server.subscribe('i-1', (m) => messages.push(m));
     return { socket, messages, close };
   };
 
-  it('subscribes by the machineChanged id with an empty document', () => {
+  it('subscribes by the push document id with an empty document', () => {
     const { socket } = follow();
 
     expect(socket.subscriptions).toHaveLength(1);
     expect(socket.last.payload).toEqual({
       query: '',
-      id: `trax_machine_turnstile_machineChanged_${hash}`,
+      id: `trax_machine_turnstile_changed_${hash}`,
       variables: { id: 'i-1' },
     });
   });
@@ -249,11 +258,11 @@ describe('createMachineServer change stream', () => {
     expect(gone.messages).toEqual([{ type: 'gone' }]);
 
     const missing = follow();
-    missing.socket.push({ problem: { code: 'not-found', message: 'No instance.' } });
-    expect(missing.messages).toEqual([{ type: 'gone' }]);
+    missing.socket.push({ problem: { code: 'NOT_FOUND', message: 'No instance.' } });
+    expect(missing.messages).toEqual([{ type: 'gone', notFound: true }]);
 
     const outdated = follow();
-    outdated.socket.push({ problem: { code: 'client-outdated', message: 'Reload.' } });
+    outdated.socket.push({ problem: { code: 'CLIENT_OUTDATED', message: 'Reload.' } });
     expect(outdated.messages).toEqual([{ type: 'client-outdated' }]);
 
     const reload = follow();
@@ -302,7 +311,31 @@ describe('createMachineServer change stream', () => {
     vi.useFakeTimers();
     const { socket, messages } = follow([100]);
 
-    socket.push({ problem: { code: 'too-many-subscriptions', message: 'Complete one.' } });
+    socket.push({ problem: { code: 'TOO_MANY_SUBSCRIPTIONS', message: 'Complete one.' } });
+    vi.advanceTimersByTime(100);
+
+    expect(messages).toEqual([]);
+    expect(socket.subscriptions).toHaveLength(2);
+  });
+
+  it('a stream refused as CONNECTION_CHANGED is not subscribed again', () => {
+    vi.useFakeTimers();
+    const { socket, messages } = follow([100], ['CONNECTION_CHANGED']);
+
+    socket.last.sink.error(refusal('CONNECTION_CHANGED', 'configureTrax was called since this server was made.'));
+    vi.advanceTimersByTime(10_000);
+
+    expect(messages).toEqual([
+      { type: 'ended', code: 'CONNECTION_CHANGED', message: 'configureTrax was called since this server was made.' },
+    ]);
+    expect(socket.subscriptions).toHaveLength(1);
+  });
+
+  it('subscribes again after an error whose code was not marked terminal', () => {
+    vi.useFakeTimers();
+    const { socket, messages } = follow([100], ['CONNECTION_CHANGED']);
+
+    socket.last.sink.error(refusal('SOMETHING_ELSE', 'dropped'));
     vi.advanceTimersByTime(100);
 
     expect(messages).toEqual([]);
@@ -356,5 +389,109 @@ describe('ServerMachineController over createMachineServer', () => {
     );
     controller.dispose();
     expect(socket.last.closed).toBe(true);
+  });
+
+  it('stops with the error of a stream refused as CONNECTION_CHANGED, and sends nothing more', async () => {
+    vi.useFakeTimers();
+    const { sent, fetch } = http(
+      answer('get', { id: 'i-1', revision: 1, state: 'Locked', context: {}, dueAt: null, problem: null }),
+    );
+    const { server, socket } = serverOver(fetch, new FakeSocket(), [100], ['CONNECTION_CHANGED']);
+    const controller = new ServerMachineController<TurnstileSpec>({
+      machine: turnstile,
+      server,
+      id: 'i-1',
+      newRequestId: sequentialRequestIds(),
+    });
+
+    await controller.start();
+    socket.last.sink.error(refusal('CONNECTION_CHANGED', 'configureTrax was called since this server was made.'));
+    vi.advanceTimersByTime(10_000);
+
+    expect(controller.get()).toMatchObject({
+      status: 'stopped',
+      error: { code: 'CONNECTION_CHANGED', message: 'configureTrax was called since this server was made.' },
+    });
+    expect(await controller.send('Coin', { coin: 'dollar' })).toMatchObject({ outcome: 'stopped' });
+    expect(socket.subscriptions).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a request refused as CONNECTION_CHANGED stops the controller and retry sends nothing', async () => {
+    // A server made before configureTrax: its headers refuse every request, as a generated client's stale server does.
+    let stale = true;
+    let tries = 0;
+    const { sent, fetch } = http(
+      answer('get', { id: 'i-1', revision: 1, state: 'Locked', context: {}, dueAt: null, problem: null }),
+    );
+    const server = createMachineServer('/graphql', {
+      fetch,
+      machine: turnstile,
+      documents: DOCUMENTS,
+      socket: new FakeSocket(),
+      terminalStreamErrors: ['CONNECTION_CHANGED'],
+      headers: () => {
+        tries++;
+        if (stale) throw refusal('CONNECTION_CHANGED', 'configureTrax was called since this server was made.');
+        return {};
+      },
+    });
+
+    const starting = new ServerMachineController<TurnstileSpec>({
+      machine: turnstile,
+      server,
+      newRequestId: sequentialRequestIds(),
+    });
+    await starting.start();
+    expect(starting.get()).toMatchObject({
+      status: 'stopped',
+      id: null,
+      error: { code: 'CONNECTION_CHANGED', message: 'configureTrax was called since this server was made.' },
+    });
+    expect(await starting.retry()).toMatchObject({ outcome: 'stopped', error: { code: 'CONNECTION_CHANGED' } });
+    expect(tries).toBe(1);
+
+    // An event on an instance opened before the connection changed stops it the same way.
+    stale = false;
+    const opened = new ServerMachineController<TurnstileSpec>({
+      machine: turnstile,
+      server,
+      id: 'i-1',
+      newRequestId: sequentialRequestIds(),
+    });
+    await opened.start();
+    expect(opened.get().status).toBe('ready');
+    stale = true;
+    expect(await opened.send('Coin', { coin: 'dollar' })).toMatchObject({
+      outcome: 'stopped',
+      error: { code: 'CONNECTION_CHANGED' },
+    });
+    expect(opened.get()).toMatchObject({ status: 'stopped', error: { code: 'CONNECTION_CHANGED' } });
+    expect(await opened.retry()).toMatchObject({ outcome: 'stopped' });
+    expect(tries).toBe(3);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a request rejected with a code not marked terminal is still a transport failure', async () => {
+    const { fetch } = http();
+    const server = createMachineServer('/graphql', {
+      fetch,
+      machine: turnstile,
+      documents: DOCUMENTS,
+      socket: new FakeSocket(),
+      terminalStreamErrors: ['CONNECTION_CHANGED'],
+      headers: () => {
+        throw refusal('SOMETHING_ELSE', 'dropped');
+      },
+    });
+    const controller = new ServerMachineController<TurnstileSpec>({
+      machine: turnstile,
+      server,
+      newRequestId: sequentialRequestIds(),
+    });
+
+    await controller.start();
+
+    expect(controller.get()).toMatchObject({ status: 'loading', error: null, problem: { kind: 'transport' } });
   });
 });

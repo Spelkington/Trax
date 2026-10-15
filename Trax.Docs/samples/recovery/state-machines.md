@@ -120,11 +120,11 @@ with a run id of its own, which the pairs the join writes are keyed by; `OnDone`
 with the number of papers and pairs and the co-citation track.
 
 **Every event declares who may send it.** `Build` and `Rebuild` enter `Building`, so both declare
-`.Requires(RecoveryRoles.Operator)`, the role `BuildTopicMapTrain` asks for; the other events declare
+`.Requires(RecoveryRoles.User)`, the role `BuildTopicMapTrain` asks for; the other events declare
 `.AnyAuthenticated()`, and only a draft's owner reads it. At startup the host compares every event that
 enters an invoking state with the train's `[TraxAuthorize]`, and refuses to start when one would let a
 caller run a train they could not run directly. The rule is checked on the server for every event, so a
-viewer's `Build` is refused as `forbidden` before anything is written.
+viewer's `Build` is refused as `FORBIDDEN` before anything is written.
 
 **Old maps are swept.** A rebuild writes a new map and moves `mapId` to it, which leaves the old one
 behind, and a demo run's map is pointed at by nothing once its run ends. `TopicMapSweeper` deletes the
@@ -134,13 +134,13 @@ client sent. The build does not delete the map it replaces: another draft of the
 it. A build writes its pairs a moment before its outcome points the draft at them, so a map is deleted only
 once two sweeps an interval apart both found it unreferenced. **Start a new map** leaves no draft behind. A draft
 in `Building`, or one a build's outcome put in `Built`, `BuildFailed` or `BuildCancelled`, is the record of that
-build, so the server refuses to discard it (`discard-not-allowed`). From those states, and from `Expired`, the page
+build, so the server refuses to discard it (`DISCARD_NOT_ALLOWED`). From those states, and from `Expired`, the page
 sends `StartOver` (any signed-in user), which resets the same draft to the first step with nothing chosen: from
 `Building` it cancels the run, and leaving `Built` cancels the review timer. Before a build, the page discards the
 draft and starts a new one. If the server refuses either, the page shows why and stays on the draft rather than
 starting another. A map no draft points at any more goes with the next two sweeps.
 
-**The demo stays under the draft cap.** Every visitor signs in with the same operator key, so every draft
+**The demo stays under the draft cap.** Every visitor signs in with the same demo user key, so every draft
 the page starts belongs to one user, and the server caps the drafts one user holds (50 by default). Besides
 leaving no draft behind when it starts a new map, the host sets `DraftTtl` to one day, so a draft a closed browser
 abandons stops counting toward the cap after a day rather than the default 30, and a demo database that lives for
@@ -163,9 +163,8 @@ The topic map is marked `[TraxMachine]`, so it is served as its own typed operat
 under the [machines root](/docs/sdk-reference/graphql-api/machines),
 `mutation { machines { topicMap { start chooseFields back build cancelBuild rebuild edit startOver discard } } }` and
 `query { machines { topicMap { get } } }`, and the generic `stateMachine` mutations are not served at all. The host also runs only persisted documents: it registers the topic map's own when it starts,
-and the page sends each by the id `topic-map.documents.json` lists, exported from the host's manifest for the IR the
-twin was generated from (`TRAX_UPDATE_MACHINE_DOCUMENTS=1 dotnet test --filter TopicMapDocumentsTests` in
-`Trax.Samples.Recovery.E2E` writes it again).
+and the page sends each by the id its generated client holds (`src/trax/`, written by `trax client` from the manifest
+the host exports with `--trax-export-client`; the sample's README has both commands).
 
 The page drives its draft with `useServerMachine` from `@traxsharp/state-machine/react`, over
 `createMachineServer` from `@traxsharp/state-machine/client`
@@ -180,7 +179,7 @@ server owns the draft; the twin only predicts:
   sends it as `clientResult`; the server applies the event itself, refuses a result that differs from its own, and
   answers what it stored, which replaces the prediction. A refused step is rolled back and its code shown.
 - Whatever else moves the draft (the build's outcome, the review timer, a recovery after a crash, a step from another
-  tab) reaches the page on `machineChanged`, subscribed by its persisted id over the socket. The page never polls:
+  tab) reaches the page on `topicMapChanged`, subscribed by its persisted id over the socket. The page never polls:
   while the draft is `Building` it sends nothing until the outcome is pushed. Every answer and push carries the
   draft's revision, and anything at or below the revision shown is dropped, so a slow answer never puts back a draft
   a push has moved on.
@@ -188,7 +187,7 @@ server owns the draft; the twin only predicts:
   start's request id is kept too until the start answers, so a reload in the middle retries it and gets the same
   draft rather than a second one. A draft the server no longer holds (discarded elsewhere, or expired) ends the
   stream with `gone`, and the page forgets it and starts a new one.
-- After a deploy that changes the machine, the host answers the page's documents `client-outdated`: the page hides
+- After a deploy that changes the machine, the host answers the page's documents `CLIENT_OUTDATED`: the page hides
   the wizard, shows the code and sends nothing more until it is reloaded.
 
 **A client cannot write a build's result.** The host serves no save, so no client writes a topic map whatever state it
@@ -219,12 +218,12 @@ Cart --PlaceOrder--> Ordered --done-----------------> Delivered
 ```
 
 Two things the recording shows are worth knowing. Place order pressed twice under one request id is answered once:
-the second answer replays the first, and a press under a new request id is `no-transition` from `Ordered`, so one
+the second answer replays the first, and a press under a new request id is `NO_TRANSITION` from `Ordered`, so one
 order makes one run and one charge. And the scheduler never retries a run a machine invoked, so a step that fails
 fails the run, which is the order's `Cancelled`. The restaurant's tablet that does not answer
-(`dispatch { orderTrouble(input: { trouble: TABLET_TIMES_OUT }) }`, armed for the next order) is therefore tried
+(`dispatch { orderTrouble(input: { trouble: TABLET_TIMES_OUT }) }`, armed for the caller's next order) is therefore tried
 again inside `SendToRestaurant`, and the machine sees one run that recovered; `discover { orders { tabletCalls } }`
-lists both attempts. A closed restaurant (`RESTAURANT_CLOSED`) fails the run at `SendToRestaurant`, before
+lists both attempts, for the caller's own orders only. A closed restaurant (`RESTAURANT_CLOSED`) fails the run at `SendToRestaurant`, before
 `ChargeCard`, so the order is `Cancelled` with nothing charged.
 
 ## SDK Reference

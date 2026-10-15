@@ -194,6 +194,9 @@ public static class GraphQLServiceExtensions
 
         services.AddTraxApi();
         services.AddSingleton<TrainTypeModule>();
+        services.AddSingleton<RunProgressTypeModule>();
+        services.TryAddSingleton<RunProgressAccess>();
+        services.TryAddSingleton<RunProgressLimits>();
 
         // requeueAllDeadLetters runs its fold in the scheduler's job list, in the background,
         // stopped only by the host shutting down; AddScheduler registers the same one, so the
@@ -252,9 +255,13 @@ public static class GraphQLServiceExtensions
             config.OperationQueriesExposed
             || hasTrainQueries
             || config.ModelRegistrations.Count > 0
-            || machinesExposed;
+            || machinesExposed
+            || config.FeatureRootFieldsAdded;
         var hasMutationRoot =
-            config.OperationMutationsExposed || hasTrainMutations || machinesExposed;
+            config.OperationMutationsExposed
+            || hasTrainMutations
+            || machinesExposed
+            || config.FeatureRootFieldsAdded;
 
         if (!hasQueryRoot)
             throw new InvalidOperationException(
@@ -279,6 +286,8 @@ public static class GraphQLServiceExtensions
             .AddType<JunctionEventGraphType>()
             .AddType<JunctionStepGraphType>()
             .AddTypeModule<TrainTypeModule>()
+            // runProgress, on a host where a train lets its starter follow it; it adds nothing otherwise.
+            .AddTypeModule<RunProgressTypeModule>()
             // The schema container does not forward to the application one, so the filter's
             // logger comes from the root provider HotChocolate exposes for exactly this.
             .AddErrorFilter(sp => new TraxErrorFilter(
@@ -290,6 +299,24 @@ public static class GraphQLServiceExtensions
         if (machinesExposed)
         {
             services.AddSingleton<MachineTypeModule>();
+            // The other surfaces an enum a machine respells could reach: a train's input or output, a query model.
+            services.AddSingleton(
+                new MachineEnumNeighbours(
+                    [
+                        .. trainRegistrations
+                            .Where(t => t.IsQuery || t.IsMutation)
+                            .SelectMany(t =>
+                                new[] { t.InputType, t.OutputType }.Select(root =>
+                                    ($"the train '{t.ServiceType.FullName}'", root)
+                                )
+                            ),
+                        .. config.ModelRegistrations.Select(r =>
+                            ($"the query model '{r.EntityType.FullName}'", r.EntityType)
+                        ),
+                    ],
+                    config.MachineSpelledEnums
+                )
+            );
             services.AddHostedService(sp => new MachineSurfacePersistedOperationsValidator(
                 sp.GetRequiredService<IServiceProviderIsService>(),
                 MachineSurface
@@ -304,6 +331,11 @@ public static class GraphQLServiceExtensions
                 (sp, schema) =>
                 {
                     var root = sp.GetRootServiceProvider();
+                    schema.TryAddTypeInterceptor(new MachineEnumBindingInterceptor());
+                    schema.TryAddTypeInterceptor(
+                        new MachineEnumSharingInterceptor(config.MachineSpelledEnums)
+                    );
+                    schema.TryAddTypeInterceptor(new MachinePushFieldCollisionInterceptor());
                     schema.TryAddTypeInterceptor(
                         new MachineJsonNamingInterceptor(
                             root.GetServices<IMachine>(),
@@ -323,7 +355,6 @@ public static class GraphQLServiceExtensions
             graphqlBuilder.AddType(new ObjectType<LogQueries>());
             graphqlBuilder.AddType(new ObjectType<MetricsQueries>());
             graphqlBuilder.AddType(new ObjectType<ConfigQueries>());
-            graphqlBuilder.AddType<ChainGraphType>();
             graphqlBuilder.AddType<RunGraphType>();
             // The operator's live feed of state-machine instances, behind the operations gate.
             graphqlBuilder.AddTypeExtension(MachineInstanceFeed.Extension());

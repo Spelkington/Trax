@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Trax.Effect.Configuration.ClientExport;
 using Trax.Effect.Configuration.TraxEffectBuilder;
 using Trax.Effect.Data.Services.DataContext;
 using Trax.Effect.Data.Services.FeatureDbConfigurator;
@@ -42,12 +43,17 @@ public static class ServiceExtensions
         string connectionString
     )
     {
+        // A process started to export its client manifest opens no database, and refuses to serve if it is not
+        // exporting after all (TraxClientExport).
+        var export = TraxClientExport.SkipsDatabase(configurationBuilder.ServiceCollection);
+
         // Run migrations unless explicitly skipped
-        if (!configurationBuilder.MigrationsDisabled)
+        if (!configurationBuilder.MigrationsDisabled && !export)
             DatabaseMigrator.Migrate(connectionString).Wait();
 
         // Enable WAL mode for better concurrent read/write performance
-        EnableWalMode(connectionString);
+        if (!export)
+            EnableWalMode(connectionString);
 
         // The in-process notice a dispatcher in this host wakes on when a save commits queued
         // work. It watches every context the factory below builds.

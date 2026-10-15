@@ -134,7 +134,7 @@ A draft now records the trigger and from-state of its last request id, and repla
 for the same trigger
 ([how a request id is matched](/docs/sdk-reference/statemachine-api/persistence-ports#how-a-request-id-is-matched)).
 A draft written before the migration has no recorded trigger, so a retry of its last request is
-refused once as `request-id-reused` rather than replayed. A custom `ISnapshotStore` should
+refused once as `REQUEST_ID_REUSED` rather than replayed. A custom `ISnapshotStore` should
 override `UpdateWithRequest` to store the whole request; without it, every retry against that
 store is refused the same way.
 
@@ -600,6 +600,44 @@ The columns are added without defaults and nothing is backfilled. A row with no 
 as before: kept when its state is a committed state, an effect's target, an invoked train's outcome target or a gated
 event's target. An effect claim the earlier version recorded in `trax.effect_claim` is still honoured: a completed one
 whose row is still in the effect's state is recorded by that row's next send, which then removes it, and one in
-flight within its lease keeps the row's events refused as `effect-in-progress`. A host on the previous version writes
+flight within its lease keeps the row's events refused as `EFFECT_IN_PROGRESS`. A host on the previous version writes
 without the columns, so during a rolling deploy it neither honours a mark a new host set nor sets one: finish the
 deploy before an instance's effect is sent, or drain sends first.
+
+## Run starter (082 and 083, SQLite 042)
+
+`082_run_starter.sql` (SQLite `042`) adds a nullable `starter_hash` (`text`) to `trax.work_queue` and `trax.metadata`:
+the lowercase hex SHA-256 of a tag and the id of whoever started the run, never the id itself. The stored form is
+`SHA-256("p\0" + principalId)` for a caller, with the qualified principal id, and `SHA-256("u\0" + userKey)` for a
+machine instance's owner, with the instance's user key, so a user key never matches a principal id that reads the
+same. Who counts as the starter:
+
+- A GraphQL train mutation records its caller, in `RUN` mode on the metadata row and in `QUEUE` mode on the work queue
+  entry, which the dispatcher copies to the run's metadata.
+- A state machine's invoking state records the instance's owner when a user owns it, and nothing for a system-owned
+  instance.
+- A requeue or resume from the operations surface keeps the original run's starter.
+- A scheduled run, a run the dashboard or the operations namespace starts, a run on a remote runner and every run
+  from before this migration record none.
+
+Only the starter can follow a run through [`runProgress`](/docs/sdk-reference/graphql-api/run-progress), so a run
+with no starter cannot be followed by anyone.
+
+The invoked-run cap (`InvokedRunLimit`, see [Invoking a train](/docs/statemachine/invoking-trains#who-a-run-belongs-to)) counts a user's live invoked runs by
+`starter_hash` as well. A row from before this migration, which has none, is still counted through its instance, so
+the count does not drop during an upgrade. `083_metadata_live_invoked_starter_index.sql` adds the partial index that
+read uses, `ix_metadata_live_invoked_starter` on `(starter_hash)` over the user-owned runs still pending or in
+progress, built `CONCURRENTLY` on Postgres. SQLite `042` creates the same index.
+
+Nothing is backfilled. A host on the previous version writes no starter, so a run it starts during a rolling deploy
+cannot be followed, and is counted by the cap only through its instance.
+
+## Manifest starter (084, SQLite 043)
+
+`084_manifest_starter.sql` (SQLite `043`) adds a nullable `starter_hash` (`text`) to `trax.manifest`, the hash of a
+principal id in the `p\0` form `082` uses. It is set when a manifest is scheduled with
+[`ScheduleOptions.StartedBy`](/docs/sdk-reference/scheduler-api/schedule), and the scheduler copies it onto every work
+queue entry it queues for the manifest, a retry, a trigger and a dead letter's requeue included, so the caller who
+scheduled a one-off manifest can follow each of its runs through
+[`runProgress`](/docs/sdk-reference/graphql-api/run-progress). Nothing is backfilled: every manifest from before, and
+every one scheduled without it, records nobody.

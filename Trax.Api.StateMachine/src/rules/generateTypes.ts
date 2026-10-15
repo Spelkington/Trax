@@ -17,6 +17,7 @@ import { irFormatVersion } from "./irFormat";
 import type { IrDocument } from "./irMachine";
 
 export function generateContextTypes(ir: IrDocument): string {
+  checkNames(ir);
   const machine = pascal(ir.id);
   const lines: string[] = [
     `// AUTO-GENERATED from ${ir.id}.ir.json by generateContextTypes. Do not edit by hand.`,
@@ -36,7 +37,7 @@ export function generateContextTypes(ir: IrDocument): string {
     lines.push(
       ...emitType(
         `${machine}${state}Context`,
-        ir.context[state] ?? { fields: [] },
+        own(ir.context, state) ?? { fields: [] },
         "context",
       ),
       "",
@@ -46,9 +47,12 @@ export function generateContextTypes(ir: IrDocument): string {
     lines.push(`  ${state}: ${machine}${state}Context;`);
   lines.push("};", "");
 
-  // An input type per trigger that declares one, and the trigger -> input map (undefined when none).
+  // An input type per trigger that declares one, and the trigger -> input map (undefined when none). An
+  // effect-bound trigger's input is the receipt the server's effect runner hands it, so a client sends it with none.
+  const effectBound = new Set(ir.transitions.filter((t) => t.effect).map((t) => t.trigger));
+  const inputOf = (trigger: string) => (effectBound.has(trigger) ? undefined : own(ir.inputs, trigger));
   for (const trigger of ir.triggers) {
-    const schema = ir.inputs[trigger];
+    const schema = inputOf(trigger);
     if (schema && schema.fields.length > 0)
       lines.push(
         ...emitType(`${machine}${trigger}Input`, schema, "input"),
@@ -56,7 +60,7 @@ export function generateContextTypes(ir: IrDocument): string {
       );
   }
   // A success outcome's input is the invoked train's output, exported under the outcome.
-  const outputOf = (outcome: string) => ir.outcomes?.[outcome]?.output;
+  const outputOf = (outcome: string) => own(ir.outcomes, outcome)?.output;
   for (const outcome of outcomes) {
     const schema = outputOf(outcome);
     if (schema && schema.fields.length > 0)
@@ -67,7 +71,7 @@ export function generateContextTypes(ir: IrDocument): string {
   }
   lines.push(`export type ${machine}Inputs = {`);
   for (const trigger of ir.triggers) {
-    const schema = ir.inputs[trigger];
+    const schema = inputOf(trigger);
     const type =
       schema && schema.fields.length > 0
         ? `${machine}${trigger}Input`
@@ -133,6 +137,7 @@ export function generateMachineFactory(
   ir: IrDocument,
   options: MachineFactoryOptions = {},
 ): string {
+  checkNames(ir);
   const machine = pascal(ir.id);
   const importStyle = options.importStyle ?? "relative";
   const specifier = options.specifier ?? "@traxsharp/state-machine";
@@ -287,8 +292,81 @@ const outcomeTypeName = (machine: string, outcome: string): string =>
     .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
     .join("")}Output`;
 
+// Each value as a string literal: its JSON, so nothing in it can end the literal.
 const union = (values: readonly string[]): string =>
-  values.map((v) => `"${v}"`).join(" | ");
+  values.map((v) => JSON.stringify(v)).join(" | ");
+
+const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+// The names every object has (`__proto__`, `constructor`, `toString`): a state or trigger named so is found on every
+// map a lookup reads it from, and a `"__proto__"` key in the twin's IR literal sets its prototype instead.
+const PROTOTYPE_MEMBERS = new Set(Object.getOwnPropertyNames(Object.prototype));
+
+// The value `map` holds under `key` itself, never one it inherits.
+const own = <T>(map: Readonly<Record<string, T>> | undefined, key: string): T | undefined =>
+  map !== undefined && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+
+/**
+ * Refuses an IR whose names cannot be written as code: the id names files and every type, a state or trigger names a
+ * type and a key, and an outcome is `<State>.<kind>`, each half a part of a type name. The IR is data a host
+ * exported, so it is checked before any of it is written.
+ */
+function checkNames(ir: IrDocument): void {
+  if (typeof ir.id !== "string" || !/^[a-z][a-z0-9]*([-_][a-z0-9]+)*$/.test(ir.id))
+    throw new Error(
+      `The machine id ${JSON.stringify(ir.id)} is not kebab-case (lowercase letters and digits in words joined by '-'), so it cannot name generated code.`,
+    );
+  const names: [string, unknown[]][] = [
+    ["state", ir.states],
+    ["trigger", ir.triggers],
+  ];
+  for (const [what, list] of names) {
+    if (!Array.isArray(list))
+      throw new Error(`The machine '${ir.id}' has no ${what}s.`);
+    for (const name of list)
+      if (typeof name !== "string" || !IDENTIFIER.test(name))
+        throw new Error(
+          `The machine '${ir.id}' has the ${what} ${JSON.stringify(name)}, which is not an identifier.`,
+        );
+      else if (PROTOTYPE_MEMBERS.has(name))
+        throw new Error(
+          `The machine '${ir.id}' has the ${what} ${JSON.stringify(name)}, a name every JavaScript object has.`,
+        );
+  }
+  for (const outcome of Object.keys(ir.outcomes ?? {})) {
+    const parts = outcome.split(".");
+    if (parts.length !== 2 || !parts.every((p) => IDENTIFIER.test(p)))
+      throw new Error(
+        `The machine '${ir.id}' has the outcome ${JSON.stringify(outcome)}, which is not <State>.<kind>.`,
+      );
+  }
+  // A state's context and invariant, and a trigger's input, are looked up by name: a key that is none of them is not
+  // the host's.
+  const declared = { state: new Set<unknown>(ir.states), trigger: new Set<unknown>(ir.triggers) };
+  const maps: [string, Readonly<Record<string, unknown>> | undefined, keyof typeof declared][] = [
+    ["context", ir.context, "state"],
+    ["invariants", ir.invariants, "state"],
+    ["inputs", ir.inputs, "trigger"],
+  ];
+  for (const [key, map, what] of maps)
+    for (const name of Object.keys(map ?? {}))
+      if (!declared[what].has(name))
+        throw new Error(
+          `The machine '${ir.id}' has ${key} for ${JSON.stringify(name)}, which is not one of its ${what}s.`,
+        );
+  // JSON.parse keeps a "__proto__" key as data, but the twin's `const ir = {...}` literal would make it a prototype.
+  if (hasProtoKey(ir))
+    throw new Error(
+      `The machine '${ir.id}' has a key "__proto__", which the twin's object literal would read as its prototype.`,
+    );
+}
+
+const hasProtoKey = (value: unknown): boolean =>
+  Array.isArray(value)
+    ? value.some(hasProtoKey)
+    : typeof value === "object" && value !== null
+      ? Object.prototype.hasOwnProperty.call(value, "__proto__") || Object.values(value).some(hasProtoKey)
+      : false;
 
 // A machine id is kebab/snake (ship-to-store); its type prefix is PascalCase (ShipToStore) and its
 // exported const is camelCase (shipToStore). Splitting on - and _ is what makes a multi-word id emit valid

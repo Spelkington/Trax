@@ -10,9 +10,26 @@ export interface Snapshot {
   context: Record<string, unknown>;
 }
 
-export type Guard = (context: Record<string, unknown>, input: unknown) => boolean;
+/**
+ * Whether an edge may be taken. `options.inputUnknown` is set when the input is one only the server has (an
+ * effect-bound trigger's receipt): a guard built from the IR then counts every rule on the input as passing and
+ * still reads the context. A guard that ignores it is read with no input.
+ */
+export type Guard = (
+  context: Record<string, unknown>,
+  input: unknown,
+  options?: { inputUnknown?: boolean },
+) => boolean;
 export type Reduce = (context: Record<string, unknown>, input: unknown) => Record<string, unknown>;
-export type ContextValidator = (context: Record<string, unknown>) => string | null;
+/**
+ * Checks a context against its state: null when it is legal there, else a message. `fromServer` is set when the
+ * context is one the server sent, which already passed the server's own checks: a validator built from the IR then
+ * counts a custom rule it has no handler for as passed, and still checks the shape and every built-in rule.
+ */
+export type ContextValidator = (
+  context: Record<string, unknown>,
+  options?: { fromServer?: boolean },
+) => string | null;
 /** Checks a trigger's input against the schema it declares: null when it matches, else a message. */
 export type InputValidator = (input: unknown) => string | null;
 
@@ -69,21 +86,27 @@ export interface MachineDefinition<S extends string, T extends string> {
   /**
    * The outcome triggers of states that invoke a train (`Fetching.done`, `Fetching.failed`,
    * `Fetching.cancelled`). Their edges are in `transitions`, tried in declaration order; when none accepts
-   * a train's output the result is `no-transition`, as on the server, and they are never offered by
-   * `availableTriggers`. Only `applyOutcome` applies one (`advance` refuses it as `outcome-bound`); the twin
+   * a train's output the result is `NO_TRANSITION`, as on the server, and they are never offered by
+   * `availableTriggers`. Only `applyOutcome` applies one (`advance` refuses it as `OUTCOME_BOUND`); the twin
    * applies an outcome it is told about and never starts a train.
    */
   outcomeTriggers?: readonly string[];
   /**
+   * The triggers whose edge runs an effect (`RunsOnce` in C#). The server's effect runner hands such a trigger its
+   * input (the receipt), so a client sends it with none, and a server-authoritative client does not predict through
+   * it: what it leads to depends on the effect.
+   */
+  effectTriggers?: readonly string[];
+  /**
    * The timers of timed states, keyed by the timed state. Only the server fires one, through `applyTimer` here as
-   * there: `advance` refuses a timer trigger as `timer-bound`, `canFire` is false for it and `availableTriggers`
+   * there: `advance` refuses a timer trigger as `TIMER_BOUND`, `canFire` is false for it and `availableTriggers`
    * never offers it. A transition into a state whose timer reads its duration from the context refuses a duration
-   * the context does not hold within bounds as `invalid-input`, as the server does.
+   * the context does not hold within bounds as `INVALID_INPUT`, as the server does.
    */
   timers?: Readonly<Partial<Record<S, MachineTimer>>>;
   /**
    * Per-trigger input validators (outcome triggers included), run after an edge is found and before any guard
-   * reads the input; a failure is `invalid-input`. A trigger with none is not checked. `machineFromIr` gives
+   * reads the input; a failure is `INVALID_INPUT`. A trigger with none is not checked. `machineFromIr` gives
    * every trigger one, from the IR's input schemas, as the server does.
    */
   inputValidators?: Partial<Record<string, InputValidator>>;

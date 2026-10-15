@@ -144,7 +144,7 @@ public class EventRuleStartupTests
     }
 
     [Test]
-    public async Task An_undeclared_start_get_or_machineChanged_rule_refuses_startup()
+    public async Task An_undeclared_start_get_or_push_rule_refuses_startup()
     {
         var refusal = await StartingHost.Start(_ => { }, Marked.Machine<UndeclaredReadsMachine>());
 
@@ -157,7 +157,7 @@ public class EventRuleStartupTests
             .Contain(UndeclaredReadsMachine.Id)
             .And.Contain("start")
             .And.Contain("get")
-            .And.Contain("machineChanged");
+            .And.Contain("changed");
     }
 
     [Test]
@@ -206,6 +206,32 @@ public class EventRuleStartupTests
             .Which.Message.Should()
             .Contain(LooseReadMachine.Id)
             .And.Contain("get");
+    }
+
+    [Test]
+    public async Task A_watch_rule_looser_than_get_is_refused_at_startup()
+    {
+        var refusal = await StartingHost.Start(_ => { }, Marked.Machine<LooseWatchMachine>());
+
+        refusal
+            .Should()
+            .BeOfType<InvalidOperationException>(
+                $"the push carries the whole instance, so it may admit no caller get refuses. See {Adr}"
+            )
+            .Which.Message.Should()
+            .Contain(LooseWatchMachine.Id)
+            .And.Contain("changed rule")
+            .And.Contain(ViewerReadMachine.Viewer);
+    }
+
+    [Test]
+    public async Task A_watch_rule_stricter_than_get_starts()
+    {
+        var refusal = await StartingHost.Start(_ => { }, Marked.Machine<StrictWatchMachine>());
+
+        refusal
+            .Should()
+            .BeNull($"a push no wider than get streams nothing get withholds. See {Adr}");
     }
 
     [Test]

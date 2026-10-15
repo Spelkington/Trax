@@ -9,6 +9,7 @@ using Trax.Effect.Enums;
 using Trax.Effect.Models.Metadata;
 using Trax.Effect.Models.Metadata.DTOs;
 using Trax.Effect.Models.WorkQueue.DTOs;
+using Trax.Effect.StateMachine;
 using Trax.Effect.StateMachine.Persistence;
 
 namespace Trax.Api.StateMachine.E2E;
@@ -17,7 +18,7 @@ namespace Trax.Api.StateMachine.E2E;
 /// Every typed event, <c>start</c> and <c>discard</c> carries a client request id, and a retry with the same id is
 /// answered with the recorded result instead of running again: twenty concurrent retries of the effect-bound event
 /// run its effect once, a retry after a server write in between replays from the row's ring, twenty concurrent
-/// starts create one instance, and an id reused for a different request is <c>request-id-reused</c>. The nodes are
+/// starts create one instance, and an id reused for a different request is <c>REQUEST_ID_REUSED</c>. The nodes are
 /// two, so a write the client did not make comes from the other node.
 /// <para>Enforces <c>Trax.Docs/adr/0048-a-machine-is-served-as-a-typed-api-and-the-server-applies-every-transition.md</c>.</para>
 /// </summary>
@@ -131,7 +132,7 @@ public class MachineRequestIdE2ETests
                 .Result(doc, field)
                 .ProblemCode.Should()
                 .Be(
-                    DraftRefusalCodes.InvalidRequestId,
+                    RefusalCode.InvalidRequestId.ToWire(),
                     $"{field} with a NUL in its request id is refused as data, never a server error. See {Adr}"
                 );
         }
@@ -231,7 +232,7 @@ public class MachineRequestIdE2ETests
         reused
             .ProblemCode.Should()
             .Be(
-                DraftRefusalCodes.RequestIdReused,
+                RefusalCode.RequestIdReused.ToWire(),
                 "a request id names one request; sending it with another event is refused, per "
                     + Adr
             );
@@ -289,6 +290,62 @@ public class MachineRequestIdE2ETests
     }
 
     [Test]
+    public async Task The_owner_reads_the_run_the_invoking_state_queued_and_nobody_else_does()
+    {
+        var approving = await A.WizardInApprovingAsync(E2EHost.AliceKey);
+        await A.AdvanceWizardAsync(E2EHost.AliceKey, "approve", approving.Id);
+        var token = await E2ESql.ScalarAsync<string>(
+            Database,
+            "SELECT invoke_token FROM trax.snapshot_draft WHERE machine = @m AND id = @id",
+            ("m", WizardMachine.MachineId),
+            ("id", approving.Id)
+        );
+        token.Should().NotBeNull("Building queued a run");
+
+        (await InvokedRunAsync(E2EHost.AliceKey, approving.Id))
+            .Should()
+            .Be(token, "the owner follows the run its state queued through runProgress");
+        (await InvokedRunAsync(E2EHost.BobKey, approving.Id))
+            .Should()
+            .BeNull("another caller reads no instance, and no run of it");
+
+        await FailQueuedRunsAsync(_nodes.B, approving.Id);
+        (
+            await E2EWait.UntilAsync(async () =>
+                (await E2ESql.DraftAsync(Database, WizardMachine.MachineId, approving.Id))?.State
+                == nameof(WizardState.BuildFailed)
+            )
+        )
+            .Should()
+            .BeTrue();
+        (await InvokedRunAsync(E2EHost.AliceKey, approving.Id))
+            .Should()
+            .BeNull("a state the outcome moved the instance to queued nothing");
+    }
+
+    private async Task<string?> InvokedRunAsync(string apiKey, Guid id)
+    {
+        using var doc = await A.PostAsync(
+            $$"""{ machines { wizard { get(id: "{{id}}") { state invokedRun { runId } } } } }""",
+            apiKey: apiKey
+        );
+        doc.RootElement.TryGetProperty("errors", out var errors)
+            .Should()
+            .BeFalse(errors.ToString());
+        var get = doc
+            .RootElement.GetProperty("data")
+            .GetProperty("machines")
+            .GetProperty("wizard")
+            .GetProperty("get");
+        return
+            get.ValueKind == System.Text.Json.JsonValueKind.Object
+            && get.GetProperty("invokedRun")
+                is { ValueKind: System.Text.Json.JsonValueKind.Object } run
+            ? run.GetProperty("runId").GetString()
+            : null;
+    }
+
+    [Test]
     public async Task Twenty_concurrent_starts_with_one_requestId_create_one_instance()
     {
         var requestId = WizardOps.NewRequestId();
@@ -332,7 +389,7 @@ public class MachineRequestIdE2ETests
             .Result(doc, "start")
             .ProblemCode.Should()
             .Be(
-                DraftRefusalCodes.RequestIdReused,
+                RefusalCode.RequestIdReused.ToWire(),
                 "a start retried with another input is a different request under the same id, per "
                     + Adr
             );

@@ -27,7 +27,8 @@ namespace Trax.Api.GraphQL.TypeModules;
 /// <seealso href="https://traxsharp.net/docs/sdk-reference/graphql-api/machines">SDK reference</seealso>
 internal sealed class MachineTypeModule(
     IEnumerable<IMachine> machines,
-    StateMachineOptions? options = null
+    StateMachineOptions? options = null,
+    MachineEnumNeighbours? enumNeighbours = null
 ) : TypeModule
 {
     public override ValueTask<IReadOnlyCollection<ITypeSystemMember>> CreateTypesAsync(
@@ -40,7 +41,11 @@ internal sealed class MachineTypeModule(
         if (exposed.Count == 0)
             return new ValueTask<IReadOnlyCollection<ITypeSystemMember>>(types);
 
-        var problems = MachineSurface.NameProblems(exposed);
+        var problems = MachineSurface
+            .NameProblems(exposed)
+            .Concat(MachineEnums.TraxEnumProblems(exposed))
+            .Concat(MachineEnums.SharingProblems(exposed, enumNeighbours))
+            .ToList();
         if (problems.Count > 0)
             throw new InvalidOperationException(
                 $"{problems.Count} problem(s) stop this host from serving its machines under the machines root:"
@@ -61,10 +66,13 @@ internal sealed class MachineTypeModule(
             NamespaceTypes.Field("RootQuery", MachineSurface.RootField, MachineSurface.QueriesType)
         );
         types.Add(DiscardResultType());
+        if (exposed.Any(MachineInvokedRun.Invokes))
+            types.Add(MachineInvokedRun.Type());
 
         foreach (var machine in exposed)
             AddMachine(types, machine);
         types.AddRange(MachineChangedSubscription.Types(exposed));
+        types.AddRange(MachineEnums.Types(exposed));
 
         return new ValueTask<IReadOnlyCollection<ITypeSystemMember>>(types);
     }
@@ -269,6 +277,8 @@ internal sealed class MachineTypeModule(
                 .Type<ObjectType<SnapshotProblem>>()
                 .Description("Why the operation was refused, or null when it was not.")
                 .Resolve(ctx => ctx.Parent<MachineAnswer>().Problem);
+            if (MachineInvokedRun.Invokes(machine))
+                MachineInvokedRun.Add(d, machine);
         });
 
     private static ObjectType DiscardResultType() =>

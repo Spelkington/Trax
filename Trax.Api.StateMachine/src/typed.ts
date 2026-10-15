@@ -1,3 +1,4 @@
+import type { RefusalCode } from './results';
 import { SnapshotMachine } from './machine';
 import { machineFromIr, type IrDocument } from './rules/irMachine';
 import type { AdvanceResult, RehydrationResult } from './results';
@@ -30,11 +31,11 @@ export type InputArgs<Spec extends MachineSpec, T extends TriggerOf<Spec>> = Spe
 
 export type TypedAdvanceResult<Spec extends MachineSpec> =
   | { outcome: 'transitioned'; snapshot: TypedSnapshot<Spec> }
-  | { outcome: 'rejected'; reason: string; detail?: string };
+  | { outcome: 'rejected'; reason: RefusalCode; detail?: string };
 
 export type TypedRehydrationResult<Spec extends MachineSpec> =
   | { result: 'ok'; snapshot: TypedSnapshot<Spec> }
-  | { result: 'error'; code: string; message: string };
+  | { result: 'error'; code: RefusalCode; message: string };
 
 /**
  * A thin, types-only wrapper over the raw engine. Adds no behavior, only compile-time safety.
@@ -92,6 +93,14 @@ export class TypedMachine<Spec extends MachineSpec> {
     return this.core.definition.committedStates?.includes(state) ?? false;
   }
 
+  /**
+   * Whether `trigger`'s edge runs an effect: the server's effect runner hands it its input, so a client sends it with
+   * none, and nothing on the client predicts what it leads to.
+   */
+  isEffectBound(trigger: TriggerOf<Spec>): boolean {
+    return this.core.definition.effectTriggers?.includes(trigger) ?? false;
+  }
+
   advance<T extends TriggerOf<Spec>>(
     snapshot: TypedSnapshot<Spec>,
     trigger: T,
@@ -112,8 +121,9 @@ export class TypedMachine<Spec extends MachineSpec> {
     return this.core.applyOutcome(snapshot, trigger, output[0]) as TypedAdvanceResult<Spec>;
   }
 
-  rehydrate(json: string): TypedRehydrationResult<Spec> {
-    return this.core.rehydrate(json) as TypedRehydrationResult<Spec>;
+  /** Reads a stored snapshot; `{ fromServer: true }` for one the server sent (see `SnapshotMachine.rehydrate`). */
+  rehydrate(json: string, options?: { fromServer?: boolean }): TypedRehydrationResult<Spec> {
+    return this.core.rehydrate(json, options) as TypedRehydrationResult<Spec>;
   }
 
   serialize(snapshot: TypedSnapshot<Spec>): string {

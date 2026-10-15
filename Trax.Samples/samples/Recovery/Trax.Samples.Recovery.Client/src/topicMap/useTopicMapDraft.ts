@@ -1,14 +1,13 @@
 // The topic map wizard's draft, owned by the server. The host exposes the topic map, so the page drives it through
 // its own typed operations, machines { topicMap { start chooseFields build ... get } }, and its push,
-// machineChanged, and nothing else: useServerMachine sends each declared event to the server, which applies it,
+// topicMapChanged, and nothing else: useServerMachine sends each declared event to the server, which applies it,
 // stores it and answers what it stored, while the generated twin only predicts the step so the page moves at once.
 // Whatever the server does to the draft (the build's outcome, the review timer, a recovery after a crash, another
 // tab's step) is pushed to the page: it never polls.
 //
 // The host runs only persisted documents. It registers the topic map's own when it starts, and the page sends each
-// by the id topic-map.documents.json lists, exported from the host's manifest for the IR the twin was generated
-// from. After a deploy that changes the machine, the host answers those ids client-outdated, and the page stops and
-// asks to be reloaded.
+// by the id its generated client (src/trax) holds, from the host's manifest. After a deploy that changes the
+// machine, the host answers those ids client-outdated, and the page stops and asks to be reloaded.
 //
 // What this file adds to the hook is the page's own memory: the draft id is kept in this browser, so closing the tab
 // and coming back opens the same draft at the same step, and a draft the server no longer holds is forgotten and a
@@ -16,13 +15,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TypedSnapshot } from "@traxsharp/state-machine";
-import { createMachineServer, persistedMessageReplacer } from "@traxsharp/state-machine/client";
 import { useServerMachine, type UseServerMachineResult } from "@traxsharp/state-machine/react";
-import { createClient } from "graphql-ws";
-import { API_KEY, API_URL, WS_URL } from "../apollo";
-import type { TopicMapSpec } from "./topic-map.contexts.g";
-import documents from "./topic-map.documents.json";
-import { topicMap } from "./topic-map.machine.g";
+import { topicMap, topicMapServer } from "../trax/index.g";
+import type { TopicMapSpec } from "../trax/topic-map/topic-map.contexts.g";
 
 export type TopicMapSnapshot = TypedSnapshot<TopicMapSpec>;
 
@@ -31,23 +26,6 @@ const DRAFT_KEY = "trax-recovery.topic-map-draft";
 // The request id of a start that has not answered yet. A reload while it is in flight sends the same id again,
 // and the server answers with the draft the first request created rather than a second one.
 const PENDING_START_KEY = "trax-recovery.topic-map-start";
-
-// The topic map's operations by their persisted ids, and its push over one socket. Browsers cannot set headers on a
-// WebSocket upgrade, so the key travels in connection_init. The socket opens with the first subscription and
-// reconnects for as long as the page is open, a host restart included; each reconnect subscribes again, and the
-// first event after it is the draft as it is then.
-const server = createMachineServer(API_URL, {
-  headers: () => ({ "X-Api-Key": API_KEY }),
-  machine: topicMap,
-  documents,
-  socket: createClient({
-    url: WS_URL,
-    connectionParams: { apiKey: API_KEY },
-    lazy: true,
-    retryAttempts: Number.POSITIVE_INFINITY,
-    jsonMessageReplacer: persistedMessageReplacer,
-  }),
-});
 
 function read(key: string): string | null {
   try {
@@ -116,6 +94,7 @@ export function useTopicMapDraft(): TopicMapDraft {
   const [opening, setOpening] = useState<Opening>(initialOpening);
   const [discarding, setDiscarding] = useState(false);
   const [refused, setRefused] = useState<string | null>(null);
+  const server = topicMapServer();
   const draft = useServerMachine(topicMap, { server, id: opening.id, startRequestId: opening.startRequestId });
   const restarting = useRef(false);
 
@@ -136,7 +115,7 @@ export function useTopicMapDraft(): TopicMapDraft {
 
   // A draft the server no longer holds (deleted elsewhere, or expired) is forgotten, and a new one started.
   useEffect(() => {
-    if (draft.error?.code !== "gone" || restarting.current) return;
+    if (draft.error?.code !== "GONE" || restarting.current) return;
     restarting.current = true;
     restart();
   }, [draft.error, restart]);
@@ -163,22 +142,22 @@ export function useTopicMapDraft(): TopicMapDraft {
       try {
         answer = old ? await server.discard(old, crypto.randomUUID()) : { kind: "discarded" };
       } catch (error) {
-        answer = { kind: "problem", code: "transport-error", message: error instanceof Error ? error.message : String(error) };
+        answer = { kind: "problem", code: "TRANSPORT_ERROR", message: error instanceof Error ? error.message : String(error) };
       }
       setDiscarding(false);
       // Discarded, or already gone: a new draft. Anything else: the old one stays, so no new one is started.
-      if (answer.kind === "discarded" || answer.code === "not-found") {
+      if (answer.kind === "discarded" || answer.code === "NOT_FOUND") {
         restart();
         return;
       }
       restarting.current = false;
       setRefused(`${answer.code}: ${answer.message}`);
     })();
-  }, [can, send, draft.id, restart]);
+  }, [can, send, draft.id, restart, server]);
 
   // A page built for another version of the machine gets the same answer to every request it could send, so it
   // drops the draft it shows, which hides every step, and sends nothing more.
-  const outdated = draft.error?.code === "client-outdated";
+  const outdated = draft.error?.code === "CLIENT_OUTDATED";
   const shown = draft.error ?? draft.problem;
 
   return {

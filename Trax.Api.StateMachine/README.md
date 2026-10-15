@@ -6,8 +6,11 @@ multi-step flow's state as language-neutral JSON so a browser client and a C# ba
 operation is total (it never throws).
 
 ```bash
-npm install @traxsharp/state-machine
+npm install @traxsharp/state-machine graphql-ws
 ```
+
+`graphql-ws` is an optional peer dependency: a machine's push and the client `trax client` generates open their
+socket with it. React is one too, for `@traxsharp/state-machine/react` and the generated hooks.
 
 It is published with every Trax release, at the same version as the `Trax.*` NuGet packages.
 
@@ -16,7 +19,7 @@ This repo owns four things:
 | Piece | Location |
 | --- | --- |
 | The `@traxsharp/state-machine` package (engine, rule interpreter, typed facade, React hook) | [`src/`](src) |
-| The `@traxsharp/state-machine/client` subpath (a host's typed `machines` operations and `machineChanged` stream, and the opt-in generic snapshot mutations) | [`src/client/`](src/client) |
+| The `@traxsharp/state-machine/client` subpath (a host's typed `machines` operations and its push stream, and the opt-in generic snapshot mutations) | [`src/client/`](src/client) |
 | The server-authoritative controller and its React hook, `useServerMachine` | [`src/server/`](src/server) |
 | The shared, language-neutral fixtures both engines drive (the cross-language oracle) | [`machines/`](machines) |
 | The IR-driven generators (`generateContextTypes` / `generateMachineFactory`) and the node entrypoints the `trax machine` CLI shells out to, which `tools/bundle-cli.mjs` bundles into the CLI's package with the engine compiled in | [`src/rules/generateTypes.ts`](src/rules/generateTypes.ts), [`tools/`](tools) |
@@ -35,7 +38,7 @@ A **snapshot** is the only thing that crosses the wire or lands in a row:
 Two engines (this one and the C# one) implement the same behavior. They are kept identical by a shared
 **differential corpus** under `machines/<machine>/`: one runtime enumerates every reachable case into a
 committed golden and every other runtime replays it and must produce the same outcome. Only the result
-*codes* (`no-transition`, `guard-failed`, `invalid-context`, `malformed`, ...) are contract; human-readable
+*codes* (`NO_TRANSITION`, `GUARD_FAILED`, `INVALID_CONTEXT`, `MALFORMED`, ...) are contract; human-readable
 detail text is free to differ. Byte-exact wire is guaranteed by a full RFC 8785 (JCS) canonical serializer in
 each runtime, pinned by a shared conformance-vector suite.
 
@@ -73,7 +76,7 @@ hand-authored `machine.json` and the `generate.mjs` node generator that read it 
 
 ## Driving a UI that owns its own data
 
-`useMachine` / `MachineController` assume the machine owns the snapshot. A wizard built on a form
+`MachineController` assumes the machine owns the snapshot. A wizard built on a form
 library doesn't — the form is the source of truth, and the machine is an oracle: *given these values at
 this step, may I fire this, and where does it land?* `createFormView` derives that whole bridge from
 the only two things an app can supply:
@@ -100,45 +103,37 @@ comes from the machine's IR (`.Committed()` in C#) — never a state name repeat
 The engine above is pure: a reducer and a rule interpreter, no I/O. Persisting a draft is a separate
 subpath, so importing the engine never pulls a transport into a bundle that only wanted the reducer.
 
-These mutations are served only when the host opts in; upgrading from a version that served them by default is
-covered in [Generic State-Machine Mutations](https://traxsharp.net/docs/migration-guides/generic-state-machine-mutations).
-When the host opts in (`ExposeGenericStateMachineMutations`), `Trax.Effect.StateMachine.Persistence` exposes
-**one** set of operations for **every** machine —
-`startSnapshot`, `saveSnapshot`, `advanceSnapshot`, `loadSnapshot`, `sendSnapshot` and `discardSnapshot` under
-`dispatch { stateMachine { … } }`,
-each carrying a `machine` discriminator the server resolves in its registry. So there is one client, not
-one per machine:
+A host serves each machine it exposes as typed operations under `machines`, registered as persisted documents and
+listed in its [client manifest](https://traxsharp.net/docs/sdk-reference/statemachine-api/client-manifest). The client
+sends only those ids, never a document of its own:
 
 ```ts
-import { createSnapshotClient, createHttpExecutor, createDraftSession } from '@traxsharp/state-machine/client';
+import { createMachineExecutor, createDraftSession } from '@traxsharp/state-machine/client';
 
-const client  = createSnapshotClient(createHttpExecutor('/graphql'));
-const session = createDraftSession({ client, machine: checkout, id: DRAFT_ID });
+const executor = createMachineExecutor('/graphql', { machines: [{ machine: checkout, documents }] });
+const session  = createDraftSession({ executor, machine: checkout, id: DRAFT_ID });
 
-await session.save(machine.serialize(snapshot));   // soft autosave
-await session.advance('Next');                     // authoritative transition
+await session.advance('Next');                     // the server applies the transition
 await session.send(requestId);                     // the exactly-once effect
 ```
 
-- **`createSnapshotClient(executor)`** — the six operations, machine-agnostic: `(machine, id)` on every
-  call. The `executor` is the seam to the host's GraphQL stack. An app with generated typed documents
-  writes a small one against those; an app without can use `createHttpExecutor`, which builds the six
-  documents itself.
-- **`createDraftSession({ client, machine, id })`** — one machine's one draft, with `machine` and
+- **`createMachineExecutor(endpoint, { machines })`**: every operation by its persisted id. A machine with no
+  documents throws when the executor is built.
+- **`createDraftSession({ executor, machine, id })`** — one machine's one draft, with `machine` and
   `schemaHash` read off the `TypedMachine` so they cannot disagree with the machine actually running.
   Every method is **total**: a refusal arrives as a typed `problem` and an unreachable server as
-  `transport-error`, so no call site needs a try/catch. Fallback copy is overridable via `messages`.
+  `TRANSPORT_ERROR`, so no call site needs a try/catch. Fallback copy is overridable via `messages`.
 
 The `schemaHash` threaded through every call is the version-skew handshake: a client whose machine has
-drifted from the deployed one is refused with `schema-mismatch` and reloads, rather than writing under an
+drifted from the deployed one is refused with `SCHEMA_MISMATCH` and reloads, rather than writing under an
 outdated contract. `advance` also accepts `clientResult` — the snapshot the local twin computed for that
-same advance — so the server can refuse a `client-divergence` instead of storing a result the two engines
+same advance — so the server can refuse a `CLIENT_DIVERGENCE` instead of storing a result the two engines
 disagree on.
 
 ### A machine the server owns
 
 A host serves each machine marked `[TraxMachine]` as its own typed operations, by persisted id, and pushes every
-write of an instance on `machineChanged`. `createMachineServer` binds those to one machine, from the documents in
+write of an instance on its push (`<machine>Changed`). `createMachineServer` binds those to one machine, from the documents in
 the host's manifest and a graphql-ws socket the page owns;
 `useServerMachine` (at `@traxsharp/state-machine/react`) drives one instance through it:
 
@@ -161,7 +156,7 @@ map.send('ChooseFields', { fields: ['Hydrology'] });
 The server applies every transition and returns what it stored. The twin only predicts: the page shows the
 prediction until the answer (or a push) replaces it, and sends it as `clientResult`. Snapshots are ordered by
 revision, events are sent one at a time per instance, each under its own requestId, and `gone` or
-`client-outdated` stop the hook for good. `ServerMachineController` is the same thing without React.
+`CLIENT_OUTDATED` stop the hook for good. `ServerMachineController` is the same thing without React.
 
 ## Status
 

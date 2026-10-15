@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -116,6 +116,27 @@ describe("generate-twin entrypoint", () => {
       specifier: "@acme/machines",
     });
     expect(read(machinePath)).toContain(`from "@acme/machines";`);
+  });
+
+  it("refuses an IR whose id would write outside the out dir", async () => {
+    // The engine refuses an id that is not kebab-case before the files are named, so an engine that writes anything
+    // stands in for it here: the twin generator's own check is what is left.
+    const engine = join(out, "engine");
+    mkdirSync(engine);
+    writeFileSync(
+      join(engine, "index.ts"),
+      'export const generateContextTypes = () => "";\nexport const generateMachineFactory = () => "";\n',
+    );
+    const ir = JSON.parse(read(turnstileIr));
+    const escaping = join(out, "escaping.ir.json");
+    writeFileSync(escaping, JSON.stringify({ ...ir, id: "../escaped" }));
+    const inside = join(out, "inside");
+
+    await expect(
+      generateTwin({ irPath: escaping, engineSrc: engine, outDir: inside }),
+    ).rejects.toThrow(/would write "\.\.\/escaped\.contexts\.g\.ts" outside/);
+    expect(existsSync(join(out, "escaped.contexts.g.ts"))).toBe(false);
+    expect(existsSync(join(out, "escaped.machine.g.ts"))).toBe(false);
   });
 
   it("rejects an unknown import style", async () => {

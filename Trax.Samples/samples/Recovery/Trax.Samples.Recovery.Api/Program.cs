@@ -13,8 +13,9 @@
 //   cd samples/Recovery/Trax.Samples.Recovery.Client && npm ci && npm run dev
 // Then open http://localhost:5173. The dashboard is at http://localhost:5260/trax (Development only).
 //
-// Auth: two demo keys, Development only:
-//   X-Api-Key: recovery-operator-key-do-not-use-in-production   (role Operator: what the page uses)
+// Auth: three demo keys, Development only:
+//   X-Api-Key: recovery-user-key-do-not-use-in-production       (role recovery-user: what the page uses)
+//   X-Api-Key: recovery-operator-key-do-not-use-in-production   (roles Operator and recovery-user: the dashboard, the API suites)
 //   X-Api-Key: recovery-viewer-key-do-not-use-in-production     (role Viewer: the broadcast view)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,7 @@ using Trax.Api.GraphQL.Extensions;
 using Trax.Api.GraphQL.PersistedOperations.Extensions;
 using Trax.Core.Decisions;
 using Trax.Dashboard.Extensions;
+using Trax.Effect.Configuration.ClientExport;
 using Trax.Effect.Data.Extensions;
 using Trax.Effect.Data.Postgres.Extensions;
 using Trax.Effect.Data.Services.DomainContext;
@@ -49,9 +51,16 @@ using Trax.Scheduler.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// An export of the client manifest (--trax-export-client) opens no database, so it needs no connection string. Npgsql
+// still wants a host when the export resolves the services, so it gets one with no database and no credential, which
+// nothing connects to.
 var connectionString =
     builder.Configuration.GetConnectionString("TraxDatabase")
-    ?? throw new InvalidOperationException("Set ConnectionStrings:TraxDatabase.");
+    ?? (
+        TraxClientExport.Requested
+            ? "Host=localhost"
+            : throw new InvalidOperationException("Set ConnectionStrings:TraxDatabase.")
+    );
 
 // ── The demo's own services ─────────────────────────────────────────────────
 var pace = builder.Configuration.GetSection(DemoPace.Section).Get<DemoPace>() ?? new DemoPace();
@@ -62,6 +71,7 @@ builder.Services.AddSingleton<CaseFiles>();
 // The food order's restaurant, simulated, and how long a cart waits for its order (30 minutes unless
 // Recovery:CartWait shortens it, as the recording does). Set before AddStateMachines builds the machine.
 builder.Services.AddSingleton<Restaurant>();
+builder.Services.AddSingleton<OrderOwners>();
 if (builder.Configuration.GetValue<TimeSpan?>("Recovery:CartWait") is { } cartWait)
     OrderMachine.CartWait = cartWait;
 
@@ -128,7 +138,7 @@ builder.Services.AddTrax(trax =>
         .AddStateMachines(
             o =>
             {
-                // Every visitor of the demo signs in with the same operator key, so all their topic maps
+                // Every visitor of the demo's page signs in with the same user key, so all their topic maps
                 // belong to one user and count against that one user's draft cap (50 by default). Starting
                 // over leaves no draft behind: the page resets a draft a build began (StartOver), which the
                 // server will not discard, and discards an earlier one. A draft a closed browser abandoned
@@ -181,13 +191,15 @@ builder.Services.AddTrax(trax =>
         )
 );
 
-// ── Authentication: two demo keys, Development only ──────────────────────────
-// The page needs each question's answer and the names of the junctions on a track, which only the
-// operations view of onJunctionEvent carries. A key carrying "do-not-use-in-production" refuses to
-// start outside Development, and outside it no key exists, so the operations namespace is closed.
+// ── Authentication: three demo keys, Development only ────────────────────────
+// The page signs in as a demo user and follows only its own runs, through runProgress, whose trains show it each
+// answer and track ([TraxRunProgress(Answers = true)]). The operator's key is the dashboard's and the API suites'. A
+// key carrying "do-not-use-in-production" refuses to start outside Development, and outside it no key exists, so the
+// operations namespace is closed.
 if (builder.Environment.IsDevelopment())
     builder.Services.AddTraxApiKeyAuth(keys =>
-        keys.Add(DemoKeys.Operator, id: "operator", RecoveryRoles.Operator)
+        keys.Add(DemoKeys.User, id: "demo-user", RecoveryRoles.User)
+            .Add(DemoKeys.Operator, id: "operator", RecoveryRoles.Operator, RecoveryRoles.User)
             .Add(DemoKeys.Viewer, id: "viewer", RecoveryRoles.Viewer)
     );
 builder.Services.AddAuthentication();
@@ -198,12 +210,15 @@ builder.Services.AddScoped<ISnapshotPrincipal, TraxCallerSnapshotPrincipal>();
 
 // ── GraphQL ─────────────────────────────────────────────────────────────────
 // The host runs only persisted documents, as it would in production: an ad-hoc document is refused on every
-// transport, and so is introspection. The topic map's documents are generated and registered by Trax when the
-// host starts, one per operation, under ids that carry the machine's IR hash; the page's other documents are
-// registered from its persisted-operations.json (PageDocuments). The manifest of the topic map's documents,
-// operations { machineDocuments }, is behind the operations gate. Recovery:RequirePersistedOperations turns
-// the refusal off, for a suite that drives the API with hand-written documents.
-var requirePersisted = builder.Configuration.GetValue("Recovery:RequirePersistedOperations", true);
+// transport, and so is introspection. Every document the page sends is generated and registered by Trax when the
+// host starts, one per machine operation, exposed train and runProgress operation, and the page holds them in its
+// generated client (src/trax, from the manifest --trax-export-client writes). The hand-written recovery_* documents
+// an earlier version registered are deactivated (RetiredPageDocuments). Recovery:RequirePersistedOperations turns
+// the refusal off, for a suite that drives the API with hand-written documents, in Development only: anywhere else
+// the setting is ignored and only registered documents run.
+var requirePersisted =
+    !builder.Environment.IsDevelopment()
+    || builder.Configuration.GetValue("Recovery:RequirePersistedOperations", true);
 builder.Services.AddTraxGraphQL(graphql =>
     graphql
         // operations.junctionRuns, requeueExecution(askAfresh:), triggerManifest(askAfresh:),
@@ -213,15 +228,17 @@ builder.Services.AddTraxGraphQL(graphql =>
         .GateOperations(roles: RecoveryRoles.Operator)
         .UsePersistedOperations(persisted =>
         {
+            // The operator manages documents too: persistedOperations, behind its own gate.
             persisted
                 .SingleNode()
                 .RequirePersisted(requirePersisted)
-                .LogNonPersistedRequests(!requirePersisted);
+                .LogNonPersistedRequests(!requirePersisted)
+                .GateManagement(roles: RecoveryRoles.Operator);
             if (requirePersisted)
                 persisted.DisableIntrospection();
         })
 );
-builder.Services.AddHostedService<PageDocuments>();
+builder.Services.AddHostedService<RetiredPageDocuments>();
 builder.Services.AddHealthChecks().AddTraxHealthCheck();
 
 // ── Dashboard, Development only ─────────────────────────────────────────────
@@ -242,9 +259,13 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 // Creates the topic_map schema and loads the canned corpus, skipping papers already there, then the
-// canned index records partitions are ingested from, skipping records already there.
-await CorpusSeeder.SeedAsync(app.Services);
-await IndexSeeder.SeedAsync(app.Services);
+// canned index records partitions are ingested from, skipping records already there. An export of the client
+// manifest (--trax-export-client) opens no database, so it seeds nothing.
+if (!TraxClientExport.Requested)
+{
+    await CorpusSeeder.SeedAsync(app.Services);
+    await IndexSeeder.SeedAsync(app.Services);
+}
 
 app.UseCors();
 app.UseAuthentication();
@@ -254,7 +275,8 @@ if (app.Environment.IsDevelopment())
 app.UseTraxGraphQL();
 app.MapHealthChecks("/trax/health");
 
-app.Run();
+// Serves, or writes the client manifest and exits when started with --trax-export-client <path>.
+await app.RunTraxAsync(args);
 
 namespace Trax.Samples.Recovery.Api
 {

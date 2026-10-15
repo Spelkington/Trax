@@ -88,8 +88,10 @@ public partial class TraxGraphQLBuilder
         )
         {
             GetRequestsAllowed = GetRequestsAllowed,
+            FeatureRootFields = FeatureRootFields.ToHashSet(StringComparer.Ordinal),
             JunctionAnswersForBroadcastAllowed = JunctionAnswersForBroadcastAllowed,
             SocketAllowedOrigins = SocketAllowedOrigins,
+            MachineSpelledEnums = MachineSpelledEnums,
             MaxOperationsPerConnection = MaxOperationsPerConnectionValue,
             MaxConnectionLifetime = MaxConnectionLifetimeValue,
             ConnectionCredentialRecheckInterval = ConnectionCredentialRecheckIntervalValue,

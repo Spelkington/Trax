@@ -81,7 +81,7 @@ public class TurnstileTests : StateMachineTestFixture
             input: """{"coin":"penny"}"""
         );
 
-        penny.ProblemCode.Should().Be("guard-failed");
+        penny.ProblemCode.Should().Be("GUARD_FAILED");
         penny.Wire.Should().BeNull();
         (await Machines.LoadAsync(Alice, Turnstile, id)).State.Should().Be("Locked");
     }
@@ -94,7 +94,7 @@ public class TurnstileTests : StateMachineTestFixture
 
         (await Machines.AdvanceAsync(Alice, Turnstile, id, "Push"))
             .ProblemCode.Should()
-            .Be("no-transition");
+            .Be("NO_TRANSITION");
         (await Machines.LoadAsync(Alice, Turnstile, id)).State.Should().Be("Locked");
     }
 
@@ -108,25 +108,19 @@ public class TurnstileTests : StateMachineTestFixture
         (await Machines.SaveAsync(Alice, Turnstile, id, TurnstileWire("Unlocked")))
             .ProblemCode.Should()
             .Be(StateMachineClient.NotServed);
-        (await Machines.LoadAsync(Alice, Turnstile, id)).ProblemCode.Should().Be("not-found");
+        (await Machines.LoadAsync(Alice, Turnstile, id)).ProblemCode.Should().Be("NOT_FOUND");
     }
 
     [Test]
-    public async Task ATurnstile_HasNoEffectToSend()
+    public void ATurnstile_HasNoEffectToSend()
     {
-        // The turnstile binds no effect, so its typed operations are its start, its discard and its two events.
-        var response = await Machines.RawAsync(
-            Alice,
-            """{ __type(name: "TurnstileMachineMutations") { fields { name } } }"""
-        );
-
-        response.HasErrors.Should().BeFalse(response.Raw);
-        response
-            .GetData("__type", "fields")
-            .EnumerateArray()
-            .Select(f => f.GetProperty("name").GetString())
+        // The turnstile binds no effect, so its typed operations are its start, its read, its push, its discard and
+        // its two events. Every test here sends these ids, so a manifest out of step with the host fails them all.
+        StateMachineClient
+            .Manifest.Machines.Single(m => m.Id == Turnstile)
+            .Documents.Select(d => d.Operation)
             .Should()
-            .BeEquivalentTo(["start", "discard", "coin", "push"]);
+            .BeEquivalentTo(["start", "get", "changed", "discard", "coin", "push"]);
     }
 
     [Test]
@@ -134,7 +128,10 @@ public class TurnstileTests : StateMachineTestFixture
     {
         (await Machines.LoadAsync(Alice, "vending", Guid.NewGuid()))
             .ProblemCode.Should()
-            .Be(StateMachineClient.NotServed, "a machine the host does not expose has no field");
+            .Be(
+                StateMachineClient.NotServed,
+                "a machine the host does not expose has no operation"
+            );
     }
 
     [Test]
@@ -144,7 +141,7 @@ public class TurnstileTests : StateMachineTestFixture
         await SeedAsync(Alice, id, TurnstileWire("Locked"));
         await Machines.AdvanceAsync(Alice, Turnstile, id, "Coin", input: """{"coin":"dollar"}""");
 
-        (await Machines.LoadAsync(Bob, Turnstile, id)).ProblemCode.Should().Be("not-found");
+        (await Machines.LoadAsync(Bob, Turnstile, id)).ProblemCode.Should().Be("NOT_FOUND");
 
         // Bob's draft under the same id is his own, and leaves Alice's alone.
         await SeedAsync(Bob, id, TurnstileWire("Locked"));

@@ -25,7 +25,7 @@ host code.
 A served machine has to be declarative (guards and reducers written as data, so it has an
 [IR](/docs/sdk-reference/statemachine-api/ir-format)) and user-owned, and it must declare who may do everything a
 client can do: a rule on every event and on its `Start`, and an owner-only or stricter rule on `Get`, `Watch` and
-`Discard`. The host refuses to start, listing every gap in one exception, until it does.
+`Discard`, with `Watch` at least as strict as `Get`, since the push carries what `get` answers. The host refuses to start, listing every gap in one exception, until it does.
 
 ```csharp compile=checkout
 using System.Text.Json.Nodes;
@@ -169,7 +169,7 @@ public sealed class TraxCallerSnapshotPrincipal(TraxCaller caller) : ISnapshotPr
 }
 ```
 
-A request with no user key is refused as `unauthenticated`. Authentication itself is the host's: see
+A request with no user key is refused as `UNAUTHENTICATED`. Authentication itself is the host's: see
 [Secure a GraphQL host](/docs/api-security).
 
 ## 4. Register the machine in the host
@@ -211,7 +211,7 @@ under [Serving a machine](/docs/sdk-reference/statemachine-api/add-state-machine
 The machine is now `machines { checkout { ... } }`: `start`, one mutation per client event (`chooseItems`, `next`,
 `back`), the effect event `pay`, `discard`, and the `get` query, each answering with the state, its typed context and
 the revision, or a `problem`. With persisted operations required (the default), a client sends each operation by
-its persisted id, which it reads from `operations { machineDocuments { ... } }` at build time; the
+its persisted id, which it reads from the exported [client manifest](/docs/sdk-reference/statemachine-api/client-manifest) at build time; the
 [TypeScript client](/docs/statemachine/call-a-machine-from-typescript) does that from the machine's
 documents. The `chooseItems` operation, written out as a document (the generated one selects every field of the
 answer):
@@ -223,8 +223,8 @@ mutation ($id: UUID!, $input: ItemsInput!, $requestId: String!) {
 }
 ```
 
-Every refusal is a typed `problem` in the data, never a thrown error: `guard-failed` carries the `Because` text,
-`forbidden` a caller the event's rule refuses, `request-id-reused` a retry that changed its request. Fields, answers
+Every refusal is a typed `problem` in the data, never a thrown error: `GUARD_FAILED` carries the `Because` text,
+`FORBIDDEN` a caller the event's rule refuses, `REQUEST_ID_REUSED` a retry that changed its request. Fields, answers
 and limits are in the [machines root](/docs/sdk-reference/graphql-api/machines), and every code in
 [Result codes](/docs/sdk-reference/statemachine-api/result-codes).
 

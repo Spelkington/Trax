@@ -51,15 +51,16 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
+    "graphql-ws": ">=6",
     "react": ">=18"
   },
   "peerDependenciesMeta": {
+    "graphql-ws": {
+      "optional": true
+    },
     "react": {
       "optional": true
     }
-  },
-  "dependencies": {
-    "valibot": "^1.5.0"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.3",

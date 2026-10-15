@@ -16,15 +16,16 @@
  * There is no typed save, and no schema hash: a machine served typed moves only through its events, and its version is
  * checked through its persisted documents. Given the machine's `documents` (the host's manifest), the executor sends
  * each operation by its persisted id with its values as variables, never a document: a host that requires persisted
- * operations refuses anything else. A document of another version of the machine is answered `client-outdated` (the
- * page reloads) or `server-outdated` (retry), and the executor returns either as a problem.
+ * operations refuses anything else. A document of another version of the machine is answered `CLIENT_OUTDATED` (the
+ * page reloads) or `SERVER_OUTDATED` (retry), and the executor returns either as a problem.
  */
+import { RefusalCode, type ProblemCode } from '../results';
 import type { MachineSpec, TypedMachine } from '../typed';
 import type { HttpExecutorOptions, SnapshotExecutor, SnapshotOutput } from './transport';
 
 /**
- * One entry of a host's machine documents manifest, as `query { operations { machineDocuments { id machine operation
- * irHash document } } }` lists it: the persisted document of one operation of one exposed machine.
+ * One machine document from the host's exported client manifest (`--trax-export-client`): the persisted document of
+ * one operation of one exposed machine.
  */
 export interface MachineDocument {
   /** The persisted id the client sends. */
@@ -40,24 +41,22 @@ export interface MachineDocument {
 }
 
 /** The codes a host answers a machine document of another version with. */
-export const OUTDATED_CODES: readonly string[] = ['client-outdated', 'server-outdated'];
+export const OUTDATED_CODES: readonly RefusalCode[] = [RefusalCode.ClientOutdated, RefusalCode.ServerOutdated];
+
+const isOutdated = (code: string | undefined): code is RefusalCode =>
+  (OUTDATED_CODES as readonly (string | undefined)[]).includes(code);
 
 /** What the executor needs to know about one exposed machine. */
 export interface TypedMachineOperations {
   /** The machine: its id names its field under `machines`, and its version stamps the snapshots rebuilt. */
   machine: TypedMachine<MachineSpec> | { id: string; version: number };
   /**
-   * The machine's persisted documents, from the host's manifest. Given, every operation is sent by its id with its
-   * values as variables, and {@link context} is not read: each document selects the whole answer. Each must be of
-   * this machine and, for a {@link TypedMachine} that carries its IR hash, of the IR the twin was generated from;
-   * otherwise {@link createMachineExecutor} throws.
+   * The machine's persisted documents, from the host's client manifest. Every operation is sent by its id with its
+   * values as variables; each document selects the whole answer. Each must be of this machine and, for a
+   * {@link TypedMachine} that carries its IR hash, of the IR the twin was generated from; otherwise
+   * {@link createMachineExecutor} throws. A machine with none throws too: a client never sends a document of its own.
    */
-  documents?: readonly MachineDocument[];
-  /**
-   * The selection of the machine's context, as GraphQL selects it: `"title pages note"`, with a sub-selection for
-   * a nested record (`"address { street }"`). Omit for a machine whose states declare no context record.
-   */
-  context?: string;
+  documents: readonly MachineDocument[];
   /**
    * The event bound to the machine's irreversible effect (`"Pay"`), which `sendSnapshot` fires. Omit for a machine
    * with no effect.
@@ -66,7 +65,7 @@ export interface TypedMachineOperations {
 }
 
 export interface MachineExecutorOptions extends HttpExecutorOptions {
-  /** Every machine the page drives, by any order; a machine not listed is answered `unknown-machine`. */
+  /** Every machine the page drives, by any order; a machine not listed is answered `UNKNOWN_MACHINE`. */
   machines: TypedMachineOperations[];
 }
 
@@ -89,18 +88,6 @@ export const eventField = (trigger: string): string => {
   return trigger.slice(0, upper - 1).toLowerCase() + trigger.slice(upper - 1);
 };
 
-/** A JSON value as a GraphQL literal: objects with bare keys, everything else as JSON writes it. */
-export const graphqlLiteral = (value: unknown): string => {
-  if (value === null || value === undefined) return 'null';
-  if (Array.isArray(value)) return `[${value.map(graphqlLiteral).join(', ')}]`;
-  if (typeof value === 'object')
-    return `{ ${Object.entries(value as Record<string, unknown>)
-      .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${k}: ${graphqlLiteral(v)}`)
-      .join(', ')} }`;
-  return JSON.stringify(value);
-};
-
 interface TypedAnswer {
   id?: string | null;
   revision?: number | null;
@@ -110,7 +97,7 @@ interface TypedAnswer {
   state?: string | null;
   context?: Record<string, unknown> | null;
   discarded?: boolean;
-  problem?: { code: string; message: string } | null;
+  problem?: { code: ProblemCode; message: string } | null;
 }
 
 // A context with every null member left out, at every depth.
@@ -133,7 +120,7 @@ const parseInput = (input: unknown): Record<string, unknown> | undefined => {
     : undefined;
 };
 
-const problem = (code: string, message: string): SnapshotOutput => ({
+const problem = (code: ProblemCode, message: string): SnapshotOutput => ({
   snapshot: null,
   problem: { code, message },
 });
@@ -144,9 +131,12 @@ const declaredVariables = (document: string | undefined): Set<string> | null =>
 
 // Checks a machine's documents against the machine, keyed by operation. A document of another machine, or of another
 // IR than the twin's, is refused here rather than sent: the host would answer it client-outdated on every request.
-const documentsOf = (typed: TypedMachineOperations): Map<string, MachineDocument> | null => {
-  if (!typed.documents) return null;
+const documentsOf = (typed: TypedMachineOperations): Map<string, MachineDocument> => {
   const machineId = typed.machine.id;
+  if (!typed.documents?.length)
+    throw new Error(
+      `The machine '${machineId}' has no persisted documents. Export the host's client manifest (--trax-export-client) and pass its documents: a client sends only the ids the host registered.`,
+    );
   const irHash = 'schemaHash' in typed.machine ? typed.machine.schemaHash : '';
   const byOperation = new Map<string, MachineDocument>();
   for (const document of typed.documents) {
@@ -168,8 +158,8 @@ type Answered = { answer: TypedAnswer | null | undefined } | { refused: Snapshot
 /**
  * An executor over plain `fetch` for the typed `machines` root. Pass it to {@link createSnapshotClient}; the
  * sessions above it are unchanged. A GraphQL error (an unauthenticated caller, a document the schema refuses) throws,
- * which the session reports as a transport error; a refusal is a problem, as data, and so is `client-outdated` or
- * `server-outdated`, the host's answer to a persisted document of another version of the machine.
+ * which the session reports as a transport error; a refusal is a problem, as data, and so is `CLIENT_OUTDATED` or
+ * `SERVER_OUTDATED`, the host's answer to a persisted document of another version of the machine.
  * @see https://traxsharp.net/docs/sdk-reference/statemachine-api/typescript-package#talking-to-a-server
  */
 export function createMachineExecutor(
@@ -192,7 +182,7 @@ export function createMachineExecutor(
     const error = answered.errors?.[0];
     if (error) {
       const code = error.extensions?.code;
-      if (code && OUTDATED_CODES.includes(code)) return { refused: problem(code, error.message) };
+      if (isOutdated(code)) return { refused: problem(code, error.message) };
       throw new Error(error.message);
     }
     return { answer: Object.values(answered.data?.machines ?? {})[0]?.[name] as TypedAnswer | null | undefined };
@@ -201,15 +191,8 @@ export function createMachineExecutor(
   return async (operation, input) => {
     const machineId = String(input.machine);
     const typed = machines.get(machineId);
-    if (!typed) return problem('unknown-machine', `No typed machine named '${machineId}' is configured.`);
+    if (!typed) return problem(RefusalCode.UnknownMachine, `No typed machine named '${machineId}' is configured.`);
 
-    const field = machineField(machineId);
-    const result = `id revision state dueAt dueAtKnown ${typed.context ? `context { ${typed.context} } ` : ''}problem { code message }`;
-    const args = (values: Record<string, unknown>) =>
-      Object.entries(values)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => `${k}: ${graphqlLiteral(v)}`)
-        .join(', ');
 
     // The answer as the generic mutations give it: the snapshot as JSON, the twin's shape.
     const output = (answer: TypedAnswer | null | undefined): SnapshotOutput | null => {
@@ -230,30 +213,21 @@ export function createMachineExecutor(
       };
     };
 
-    // One operation: by its persisted id, its values as variables, when the machine has documents; else inline.
-    const run = async (
-      keyword: 'mutation' | 'query',
-      name: string,
-      values: Record<string, unknown>,
-      selection = result,
-    ): Promise<Answered> => {
-      if (typed.byOperation) {
-        const document = typed.byOperation.get(name);
-        if (!document)
-          return {
-            refused: problem(
-              'client-outdated',
-              `There is no document for '${machineId}.${name}': the documents are of another version of the machine.`,
-            ),
-          };
-        const declared = declaredVariables(document.document);
-        const variables = Object.fromEntries(
-          Object.entries(values).filter(([k, v]) => v !== undefined && (declared === null || declared.has(k))),
-        );
-        return post({ id: document.id, variables }, name);
-      }
-      const root = keyword === 'mutation' ? 'mutation ' : '';
-      return post({ query: `${root}{ machines { ${field} { ${name}(${args(values)}) { ${selection} } } } }` }, name);
+    // One operation, by its persisted id, its values as variables.
+    const run = async (name: string, values: Record<string, unknown>): Promise<Answered> => {
+      const document = typed.byOperation.get(name);
+      if (!document)
+        return {
+          refused: problem(
+            RefusalCode.ClientOutdated,
+            `There is no document for '${machineId}.${name}': the documents are of another version of the machine.`,
+          ),
+        };
+      const declared = declaredVariables(document.document);
+      const variables = Object.fromEntries(
+        Object.entries(values).filter(([k, v]) => v !== undefined && (declared === null || declared.has(k))),
+      );
+      return post({ id: document.id, variables }, name);
     };
 
     const answer = async (answered: Promise<Answered>) => {
@@ -263,11 +237,11 @@ export function createMachineExecutor(
 
     switch (operation) {
       case 'startSnapshot':
-        return answer(run('mutation', 'start', { input: parseInput(input.input), requestId: input.requestId }));
+        return answer(run('start', { input: parseInput(input.input), requestId: input.requestId }));
 
       case 'advanceSnapshot':
         return answer(
-          run('mutation', eventField(String(input.trigger)), {
+          run(eventField(String(input.trigger)), {
             id: input.id,
             input: parseInput(input.input),
             requestId: input.requestId,
@@ -276,27 +250,22 @@ export function createMachineExecutor(
         );
 
       case 'sendSnapshot':
-        if (!typed.effectEvent) return problem('no-effect', `Machine '${machineId}' has no effect to send.`);
+        if (!typed.effectEvent) return problem(RefusalCode.NoEffect, `Machine '${machineId}' has no effect to send.`);
         return answer(
-          run('mutation', eventField(typed.effectEvent), {
+          run(eventField(typed.effectEvent), {
             id: input.id,
             requestId: input.requestId ?? `send:${String(input.id)}`,
           }),
         );
 
       case 'loadSnapshot': {
-        const done = await run('query', 'get', { id: input.id });
+        const done = await run('get', { id: input.id });
         if ('refused' in done) return done.refused;
-        return done.answer ? output(done.answer) : problem('not-found', 'No draft with that id.');
+        return done.answer ? output(done.answer) : problem(RefusalCode.NotFound, 'No draft with that id.');
       }
 
       case 'discardSnapshot': {
-        const done = await run(
-          'mutation',
-          'discard',
-          { id: input.id, requestId: input.requestId },
-          'id discarded problem { code message }',
-        );
+        const done = await run('discard', { id: input.id, requestId: input.requestId });
         if ('refused' in done) return done.refused;
         const discarded = done.answer;
         return discarded
@@ -306,7 +275,7 @@ export function createMachineExecutor(
 
       case 'saveSnapshot':
         return problem(
-          'save-not-allowed',
+          RefusalCode.SaveNotAllowed,
           `Machine '${machineId}' is served typed: it moves only through its declared events.`,
         );
     }

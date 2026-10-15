@@ -1,3 +1,5 @@
+using Trax.Effect.Attributes;
+
 namespace Trax.Api.GraphQL.PersistedOperations.Configuration;
 
 /// <summary>
@@ -12,11 +14,17 @@ public sealed class PersistedOperationsOptions
     internal PersistedOperationsOptions() { }
 
     /// <summary>
-    /// When true (the default), <c>UsePersistedOperations</c> grafts the <c>operations</c>
-    /// namespace onto the schema, which is where the persisted-operation management mutations
-    /// live. When false, enforcement and storage are wired without it.
+    /// The requirements <c>GateManagement</c> declared for the <c>persistedOperations</c>
+    /// management fields, each one a requirement of its own. Empty when none was declared, and
+    /// then the fields are not served.
     /// </summary>
-    public bool ExposeOperationsNamespace { get; internal set; } = true;
+    internal IReadOnlyList<TraxAuthorizeAttribute> ManagementGate { get; init; } = [];
+
+    /// <summary>
+    /// Whether documents are managed through a Trax surface, the <c>persistedOperations</c> fields
+    /// and the dashboard's pages: true once the host declared who may with <c>GateManagement</c>.
+    /// </summary>
+    public bool ManagementServed => ManagementGate.Count > 0;
 
     /// <summary>
     /// When true, requests carrying an inline <c>query</c> body (rather than
@@ -85,16 +93,17 @@ public sealed class PersistedOperationsOptions
     internal static readonly TimeSpan DefaultCacheMaxAge = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// How long an older version's machine documents stay active after this node registered a newer version's, set
-    /// by <c>KeepOlderMachineDocumentsFor</c>. Defaults to seven days.
+    /// How long a version of the generated documents stays active once no node registers it, set by
+    /// <c>KeepOlderMachineDocumentsFor</c>. Defaults to seven days.
     /// </summary>
     internal TimeSpan MachineDocumentGracePeriod { get; set; } = DefaultMachineDocumentGracePeriod;
 
     internal static readonly TimeSpan DefaultMachineDocumentGracePeriod = TimeSpan.FromDays(7);
 
     /// <summary>
-    /// How often a running node registers its machine documents again, which collects an older version's once the
-    /// grace period has passed. Defaults to an hour.
+    /// How often a running node registers its generated documents again, which keeps its own registered and collects
+    /// any other version no node has registered for the grace period. Defaults to an hour; a node registers at least
+    /// every quarter of the grace period whatever this says.
     /// </summary>
     internal TimeSpan MachineDocumentCollectionInterval { get; set; } =
         DefaultMachineDocumentCollectionInterval;

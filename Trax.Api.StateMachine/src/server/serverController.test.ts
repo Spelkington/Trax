@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { reminder } from '../machines/reminder/reminder.machine.g';
 import type { ReminderSpec } from '../machines/reminder/reminder.contexts.g';
 import { turnstile, type TurnstileSpec } from '../machines/turnstile/turnstile';
+import type { IrDocument } from '../rules/irMachine';
+import { typedMachineFromIr } from '../typed';
+import { checkout, type CheckoutSpec } from '../machines/checkout/checkout';
 import { ServerMachineController, type ServerMachineOptions } from './serverController';
 import {
   FakeMachineServer,
@@ -69,6 +72,97 @@ describe('ServerMachineController', () => {
     expect(controller.get().pending).toBe(true);
   });
 
+  it('does not predict through an effect-bound event even when the twin could', async () => {
+    const server = new FakeMachineServer();
+    const controller = new ServerMachineController<CheckoutSpec>({
+      machine: checkout,
+      server,
+      id: 'c-1',
+      newRequestId: sequentialRequestIds(),
+    });
+    const started = controller.start();
+    await flushMicrotasks();
+    const review = { currency: 'USD', items: ['latte'], receipt: null, total: 4 };
+    server.gets[0].resolve({ kind: 'ok', snapshot: serverSnapshot({ state: 'Review', context: review }) });
+    await started;
+    await flushMicrotasks();
+
+    expect(checkout.isEffectBound('Pay')).toBe(true);
+    expect(controller.can('Pay')).toBe(true);
+    // A receipt the types do not allow, so a prediction would succeed if the controller tried one.
+    const receipt = { receipt: 'r-1' };
+    expect(checkout.core.advance(checkout.snapshotAt('Review', review), 'Pay', receipt)).toMatchObject({
+      outcome: 'transitioned',
+    });
+    void controller.send('Pay', ...([receipt] as unknown as []));
+    void controller.send('Restart');
+    await flushMicrotasks();
+
+    expect(server.events[0].request).toMatchObject({ id: 'c-1', trigger: 'Pay' });
+    expect(server.events[0].request.clientResult).toBeUndefined();
+    expect(controller.get().snapshot?.state).toBe('Review');
+  });
+
+  it('can for an effect-bound trigger still reads its guard\'s context rules', async () => {
+    // No invariant on Open, so only the guard's own context rule keeps Pay from an empty order.
+    interface OrderSpec {
+      states: { Open: { items: string[]; receipt: string | null }; Paid: { items: string[]; receipt: string | null } };
+      triggers: { Pay: undefined };
+    }
+    const fields = [
+      { name: 'items', type: 'array', nullable: false, values: { type: 'string', nullable: false }, constraints: [] },
+      { name: 'receipt', type: 'string', nullable: true, constraints: [] },
+    ];
+    const order = typedMachineFromIr<OrderSpec>({
+      irFormat: 1,
+      id: 'order',
+      version: 1,
+      initialState: 'Open',
+      initialContext: { items: [], receipt: null },
+      states: ['Open', 'Paid'],
+      triggers: ['Pay'],
+      committedStates: ['Paid'],
+      context: { Open: { fields }, Paid: { fields } },
+      inputs: {},
+      transitions: [
+        {
+          from: 'Open',
+          trigger: 'Pay',
+          to: 'Paid',
+          effect: { keyPrefix: 'order:charge' },
+          guard: {
+            rule: 'all',
+            rules: [
+              { rule: 'count', source: 'context', field: 'items', op: 'gt', value: 0 },
+              { rule: 'present', source: 'input', field: 'receipt' },
+            ],
+          },
+          reduce: { reduce: 'set', steps: [{ field: 'receipt', value: { input: 'receipt' } }] },
+        },
+      ],
+    } as IrDocument);
+    expect(order.isEffectBound('Pay')).toBe(true);
+
+    const opened = async (items: string[]) => {
+      const server = new FakeMachineServer();
+      const controller = new ServerMachineController<OrderSpec>({
+        machine: order,
+        server,
+        id: 'o-1',
+        newRequestId: sequentialRequestIds(),
+      });
+      const started = controller.start();
+      await flushMicrotasks();
+      server.gets[0].resolve({ kind: 'ok', snapshot: serverSnapshot({ state: 'Open', context: { items, receipt: null } }) });
+      await started;
+      await flushMicrotasks();
+      return controller;
+    };
+
+    expect((await opened([])).can('Pay')).toBe(false);
+    expect((await opened(['latte'])).can('Pay')).toBe(true);
+  });
+
   it('sends the prediction as clientResult', async () => {
     const { server, controller } = await ready();
 
@@ -89,7 +183,7 @@ describe('ServerMachineController', () => {
 
     void controller.send('Coin', { coin: 'quarter' });
     await flushMicrotasks();
-    server.events[0].resolve({ kind: 'problem', code: 'client-divergence', message: 'diverged' });
+    server.events[0].resolve({ kind: 'problem', code: 'CLIENT_DIVERGENCE', message: 'diverged' });
     await flushMicrotasks();
 
     expect(server.gets).toHaveLength(2);
@@ -126,7 +220,7 @@ describe('ServerMachineController', () => {
     void controller.send('Coin', { coin: 'quarter' });
     void controller.send('Push'); // predicted from the Coin prediction: Unlocked, then Push to Locked
     await flushMicrotasks();
-    server.events[0].resolve({ kind: 'problem', code: 'guard-failed', message: 'no' });
+    server.events[0].resolve({ kind: 'problem', code: 'GUARD_FAILED', message: 'no' });
     await flushMicrotasks();
 
     // From the server's Locked, the twin cannot push, so the second event goes without a prediction.
@@ -134,7 +228,7 @@ describe('ServerMachineController', () => {
     expect(server.events[1].request.trigger).toBe('Push');
     expect(server.events[1].request.clientResult).toBeUndefined();
     expect(controller.get().snapshot).toEqual(controller.get().confirmed);
-    expect(controller.get().problem?.code).toBe('guard-failed');
+    expect(controller.get().problem?.code).toBe('GUARD_FAILED');
   });
 
   it('retries a failed request with the same requestId; a new send gets a new one', async () => {
@@ -175,7 +269,7 @@ describe('ServerMachineController', () => {
     const retried = controller.retry();
     await flushMicrotasks();
     expect(server.events).toHaveLength(2);
-    expect(await retried).toMatchObject({ outcome: 'failed', problem: { code: 'nothing-to-retry' } });
+    expect(await retried).toMatchObject({ outcome: 'failed', problem: { code: 'NOTHING_TO_RETRY' } });
     expect(controller.get().revision).toBe(2);
   });
 
@@ -190,7 +284,7 @@ describe('ServerMachineController', () => {
     // A refusal moves nothing on the server, so the failed event is still the one to resend.
     void controller.send('Push');
     await flushMicrotasks();
-    server.events[1].resolve({ kind: 'problem', code: 'guard-failed', message: 'no' });
+    server.events[1].resolve({ kind: 'problem', code: 'GUARD_FAILED', message: 'no' });
     await flushMicrotasks();
 
     void controller.retry();
@@ -212,7 +306,7 @@ describe('ServerMachineController', () => {
     await flushMicrotasks();
     server.starts[0].fail();
     await flushMicrotasks();
-    expect(controller.get().problem?.code).toBe('transport-error');
+    expect(controller.get().problem?.code).toBe('TRANSPORT_ERROR');
     expect(controller.get().status).toBe('loading');
 
     const retried = controller.retry();
@@ -229,7 +323,7 @@ describe('ServerMachineController', () => {
     expect(server.openSubscriptions('i-1')).toHaveLength(1);
 
     // The start is spent: a retry now has nothing to resend, and nothing is started again.
-    expect(await controller.retry()).toMatchObject({ outcome: 'failed', problem: { code: 'nothing-to-retry' } });
+    expect(await controller.retry()).toMatchObject({ outcome: 'failed', problem: { code: 'NOTHING_TO_RETRY' } });
     expect(server.starts).toHaveLength(2);
   });
 
@@ -239,10 +333,10 @@ describe('ServerMachineController', () => {
 
     void controller.start();
     await flushMicrotasks();
-    server.starts[0].resolve({ kind: 'problem', code: 'too-many-drafts', message: 'cap' });
+    server.starts[0].resolve({ kind: 'problem', code: 'TOO_MANY_DRAFTS', message: 'cap' });
     await flushMicrotasks();
 
-    expect(await controller.retry()).toMatchObject({ outcome: 'failed', problem: { code: 'nothing-to-retry' } });
+    expect(await controller.retry()).toMatchObject({ outcome: 'failed', problem: { code: 'NOTHING_TO_RETRY' } });
     expect(server.starts).toHaveLength(1);
   });
 
@@ -252,14 +346,14 @@ describe('ServerMachineController', () => {
 
     const sent = controller.send('Coin', { coin: 'quarter' });
     await flushMicrotasks();
-    server.events[0].resolve({ kind: 'problem', code: 'server-outdated', message: 'newer node' });
+    server.events[0].resolve({ kind: 'problem', code: 'SERVER_OUTDATED', message: 'newer node' });
     await flushMicrotasks();
     expect(server.events).toHaveLength(1);
 
     vi.advanceTimersByTime(100);
     await flushMicrotasks();
     expect(server.events).toHaveLength(2);
-    server.events[1].resolve({ kind: 'problem', code: 'server-outdated', message: 'newer node' });
+    server.events[1].resolve({ kind: 'problem', code: 'SERVER_OUTDATED', message: 'newer node' });
     await flushMicrotasks();
 
     vi.advanceTimersByTime(199);
@@ -290,7 +384,7 @@ describe('ServerMachineController', () => {
     void controller.start();
     await flushMicrotasks();
     expect(server.starts).toHaveLength(1);
-    server.starts[0].resolve({ kind: 'problem', code: 'server-outdated', message: 'newer node' });
+    server.starts[0].resolve({ kind: 'problem', code: 'SERVER_OUTDATED', message: 'newer node' });
     await flushMicrotasks();
     expect(controller.get().status).not.toBe('stopped');
 
@@ -300,7 +394,7 @@ describe('ServerMachineController', () => {
     vi.advanceTimersByTime(1);
     await flushMicrotasks();
     expect(server.starts).toHaveLength(2);
-    server.starts[1].resolve({ kind: 'problem', code: 'server-outdated', message: 'newer node' });
+    server.starts[1].resolve({ kind: 'problem', code: 'SERVER_OUTDATED', message: 'newer node' });
     await flushMicrotasks();
 
     vi.advanceTimersByTime(200);
@@ -326,15 +420,15 @@ describe('ServerMachineController', () => {
 
     void controller.start();
     await flushMicrotasks();
-    server.starts[0].resolve({ kind: 'problem', code: 'server-outdated', message: 'newer node' });
+    server.starts[0].resolve({ kind: 'problem', code: 'SERVER_OUTDATED', message: 'newer node' });
     await flushMicrotasks();
     vi.advanceTimersByTime(100);
     await flushMicrotasks();
-    server.starts[1].resolve({ kind: 'problem', code: 'server-outdated', message: 'newer node' });
+    server.starts[1].resolve({ kind: 'problem', code: 'SERVER_OUTDATED', message: 'newer node' });
     await flushMicrotasks();
 
     expect(server.starts).toHaveLength(2);
-    expect(controller.get().problem?.code).toBe('server-outdated');
+    expect(controller.get().problem?.code).toBe('SERVER_OUTDATED');
     expect(controller.get().status).not.toBe('stopped');
   });
 
@@ -451,12 +545,12 @@ describe('ServerMachineController', () => {
     // The server moved the instance itself (a timer, say), then refused the client's event.
     server.stream('i-1').push({ type: 'snapshot', snapshot: serverSnapshot({ revision: 2, ...unlocked('dollar') }) });
     await flushMicrotasks();
-    server.events[0].resolve({ kind: 'problem', code: 'no-transition', message: 'already unlocked' });
+    server.events[0].resolve({ kind: 'problem', code: 'NO_TRANSITION', message: 'already unlocked' });
     await flushMicrotasks();
 
     expect(controller.get().snapshot).toEqual(turnstile.snapshotAt('Unlocked', { paidWith: 'dollar' }));
     expect(controller.get().revision).toBe(2);
-    expect(controller.get().problem?.code).toBe('no-transition');
+    expect(controller.get().problem?.code).toBe('NO_TRANSITION');
   });
 
   describe('dueAt', () => {
@@ -657,6 +751,105 @@ describe('ServerMachineController', () => {
       server.gets[1].resolve({ kind: 'ok', snapshot: serverSnapshot({ revision: 4, ...unlocked('q'), dueAt: due }) });
       await flushMicrotasks();
       expect(controller.get().dueAt).toBe(due);
+    });
+  });
+
+  describe('a machine with a custom invariant', () => {
+    // A cart whose total only the server can price: the vocabulary has no arithmetic, so Cart requires a custom rule
+    // the twin has no handler for, beside a built-in one.
+    interface PricedSpec {
+      states: {
+        Cart: { items: string[]; total: number; receipt: string | null };
+        Paid: { items: string[]; total: number; receipt: string | null };
+      };
+      triggers: { AddItem: { item: string }; Pay: undefined };
+    }
+    const fields = [
+      { name: 'items', type: 'array', nullable: false, values: { type: 'string', nullable: false }, constraints: [] },
+      { name: 'total', type: 'integer', nullable: false, constraints: [] },
+      { name: 'receipt', type: 'string', nullable: true, constraints: [] },
+    ];
+    const priced = typedMachineFromIr<PricedSpec>({
+      irFormat: 1,
+      id: 'priced',
+      version: 1,
+      initialState: 'Cart',
+      initialContext: { items: [], total: 0, receipt: null },
+      states: ['Cart', 'Paid'],
+      triggers: ['AddItem', 'Pay'],
+      committedStates: ['Paid'],
+      context: { Cart: { fields }, Paid: { fields } },
+      inputs: { AddItem: { fields: [{ name: 'item', type: 'string', nullable: false, constraints: [] }] } },
+      invariants: {
+        Cart: {
+          rule: 'all',
+          rules: [
+            { rule: 'absent', source: 'context', field: 'receipt' },
+            { rule: 'custom', name: 'priced:total-matches-items' },
+          ],
+        },
+      },
+      transitions: [
+        { from: 'Cart', trigger: 'AddItem', to: 'Cart', reduce: { reduce: 'custom', name: 'priced:add-item' } },
+        { from: 'Cart', trigger: 'Pay', to: 'Paid' },
+      ],
+    } as IrDocument);
+
+    const cart = { items: ['apple'], total: 120, receipt: null };
+
+    async function open(snapshot: Parameters<FakeMachineServer['gets'][number]['resolve']>[0]) {
+      const server = new FakeMachineServer();
+      const controller = new ServerMachineController<PricedSpec>({
+        machine: priced,
+        server,
+        id: 'c-1',
+        newRequestId: sequentialRequestIds(),
+      });
+      const started = controller.start();
+      await flushMicrotasks();
+      server.gets[0].resolve(snapshot);
+      await started;
+      await flushMicrotasks();
+      return { server, controller };
+    }
+
+    it('reads a server snapshot under a custom invariant', async () => {
+      const { controller } = await open({ kind: 'ok', snapshot: serverSnapshot({ state: 'Cart', context: cart }) });
+
+      expect(controller.get().status).toBe('ready');
+      expect(controller.get().error).toBeNull();
+      expect(controller.get().snapshot).toEqual(priced.snapshotAt('Cart', cart));
+    });
+
+    it('still refuses a server snapshot that breaks a built-in rule beside it', async () => {
+      const { controller } = await open({
+        kind: 'ok',
+        snapshot: serverSnapshot({ state: 'Cart', context: { ...cart, receipt: 'r-1' } }),
+      });
+
+      expect(controller.get().status).toBe('stopped');
+      expect(controller.get().error?.code).toBe('CLIENT_OUTDATED');
+    });
+
+    it('still refuses a server snapshot of the wrong shape', async () => {
+      const { controller } = await open({
+        kind: 'ok',
+        snapshot: serverSnapshot({ state: 'Cart', context: { items: ['apple'], total: 'many', receipt: null } }),
+      });
+
+      expect(controller.get().status).toBe('stopped');
+      expect(controller.get().error?.code).toBe('CLIENT_OUTDATED');
+    });
+
+    it('does not predict a transition into a state whose custom rule it cannot check', async () => {
+      const { server, controller } = await open({ kind: 'ok', snapshot: serverSnapshot({ state: 'Cart', context: cart }) });
+
+      void controller.send('AddItem', { item: 'pear' });
+      await flushMicrotasks();
+
+      expect(server.events).toHaveLength(1);
+      expect(server.events[0].request.clientResult).toBeUndefined();
+      expect(controller.get().snapshot).toEqual(priced.snapshotAt('Cart', cart));
     });
   });
 });

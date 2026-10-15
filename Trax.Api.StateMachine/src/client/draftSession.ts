@@ -1,17 +1,16 @@
 /**
- * One user's one draft of one machine, over the generic operations, and {@link startDraft}, which creates one.
- *
- * `createSnapshotClient` is machine-agnostic and takes `(machine, id)` on every call; a UI almost always
- * wants the opposite — a handle that has already been told which machine and which draft it is looking
- * at, so the wizard code never repeats either. That is a {@link DraftSession}.
+ * One user's one draft of one machine, over the machine's persisted documents (an executor from
+ * `createMachineExecutor`), and {@link startDraft}, which creates one. The session is a handle already told which
+ * machine and which draft it is looking at, so the wizard code never repeats either.
  *
  * The other thing it adds is TOTALITY at the edge. The server answers a refusal as data (a typed
  * `problem`) but the network can still fail, so a caller that wanted to know "did my draft save?" would
  * otherwise need a try/catch at every call site. Every method here returns a {@link DraftResult}
  * instead: nothing throws, and an unreachable server is just another `ok: false` with a code.
  */
+import { ClientProblemCode, RefusalCode, type ProblemCode } from '../results';
 import type { MachineSpec, TypedMachine } from '../typed';
-import type { AdvanceOptions, SnapshotClient, SnapshotOutput } from './transport';
+import { createSnapshotClient, type AdvanceOptions, type SnapshotExecutor, type SnapshotOutput } from './transport';
 
 /**
  * Total: the stored snapshot (JSON, or null when there is no draft yet), or why not. `revision` is the instance's
@@ -20,10 +19,10 @@ import type { AdvanceOptions, SnapshotClient, SnapshotOutput } from './transport
  */
 export type DraftResult =
   | { ok: true; snapshot: string | null; revision?: number | null }
-  | { ok: false; code: string; message: string };
+  | { ok: false; code: ProblemCode; message: string };
 
 /** The code reported when the request never reached the server (offline, DNS, a 500, an auth error). */
-export const TRANSPORT_ERROR = 'transport-error';
+export const TRANSPORT_ERROR = ClientProblemCode.TransportError;
 
 /**
  * User-facing fallbacks, used only when the server refuses WITHOUT a message or the transport fails.
@@ -60,7 +59,8 @@ const DEFAULT_MESSAGES: DraftMessages = {
 };
 
 export interface DraftSessionOptions {
-  client: SnapshotClient;
+  /** The machine's executor, from `createMachineExecutor`: every operation is sent by its persisted id. */
+  executor: SnapshotExecutor;
   /**
    * The machine this draft belongs to: a {@link TypedMachine} (its `id` and `schemaHash` are read from
    * it, which is what you want — they cannot then disagree with the machine actually running) or the
@@ -97,10 +97,11 @@ export interface DraftSession {
 /** Total: the new draft's server-minted id and its first snapshot, or why not. */
 export type StartResult =
   | { ok: true; id: string; snapshot: string; created: boolean; revision?: number | null }
-  | { ok: false; code: string; message: string };
+  | { ok: false; code: ProblemCode; message: string };
 
 export interface StartDraftOptions {
-  client: SnapshotClient;
+  /** The machine's executor, from `createMachineExecutor`. */
+  executor: SnapshotExecutor;
   /** The machine to start, as in {@link DraftSessionOptions.machine}. */
   machine: TypedMachine<MachineSpec> | string;
   /**
@@ -126,7 +127,7 @@ const settleOutput = async (
   call: () => Promise<SnapshotOutput>,
   refused: string,
   unavailable: string,
-): Promise<{ ok: true; output: SnapshotOutput } | { ok: false; code: string; message: string }> => {
+): Promise<{ ok: true; output: SnapshotOutput } | { ok: false; code: ProblemCode; message: string }> => {
   let output: SnapshotOutput;
   try {
     output = await call();
@@ -151,7 +152,7 @@ export async function startDraft(options: StartDraftOptions): Promise<StartResul
   const messages: DraftMessages = { ...DEFAULT_MESSAGES, ...options.messages };
   const settled = await settleOutput(
     () =>
-      options.client.start(machine, options.requestId, { input: options.input, schemaHash }),
+      createSnapshotClient(options.executor).start(machine, options.requestId, { input: options.input, schemaHash }),
     messages.startRefused,
     messages.startUnavailable,
   );
@@ -166,7 +167,8 @@ export async function startDraft(options: StartDraftOptions): Promise<StartResul
  * @see https://traxsharp.net/docs/sdk-reference/statemachine-api/typescript-package#talking-to-a-server
  */
 export function createDraftSession(options: DraftSessionOptions): DraftSession {
-  const { client, id } = options;
+  const { id } = options;
+  const client = createSnapshotClient(options.executor);
   const machine = nameOf(options.machine);
   const schemaHash = hashOf(options.machine, options.schemaHash);
   const messages: DraftMessages = { ...DEFAULT_MESSAGES, ...options.messages };
@@ -204,7 +206,7 @@ export function createDraftSession(options: DraftSessionOptions): DraftSession {
         messages.advanceUnavailable,
       ),
 
-    // The server answers a draft that does not exist yet with a `not-found` problem; to a caller
+    // The server answers a draft that does not exist yet with a `NOT_FOUND` problem; to a caller
     // that is no draft, as this method's contract says, not a failure.
     load: async () => {
       const loaded = await settle(
@@ -212,7 +214,7 @@ export function createDraftSession(options: DraftSessionOptions): DraftSession {
         messages.loadUnavailable,
         messages.loadUnavailable,
       );
-      return !loaded.ok && loaded.code === 'not-found' ? { ok: true, snapshot: null } : loaded;
+      return !loaded.ok && loaded.code === RefusalCode.NotFound ? { ok: true, snapshot: null } : loaded;
     },
 
     send: (requestId) =>

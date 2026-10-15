@@ -1,3 +1,4 @@
+import { ClientProblemCode, RefusalCode } from '../results';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { Problem } from '../problem';
 import type { InputArgs, MachineSpec, StateOf, TriggerOf, TypedMachine, TypedSnapshot } from '../typed';
@@ -33,16 +34,16 @@ export interface UseServerMachineOptions {
   startStorageKey?: string | null;
   /**
    * Mints a requestId; defaults to `crypto.randomUUID`. A custom one must mint 1 to 200 characters, not blank, with no
-   * control character and no unpaired surrogate: the server answers any other id `invalid-request-id`.
+   * control character and no unpaired surrogate: the server answers any other id `INVALID_REQUEST_ID`.
    */
   newRequestId?: () => string;
-  /** Delays, in milliseconds, between retries of a `server-outdated` answer or a failed read. */
+  /** Delays, in milliseconds, between retries of a `SERVER_OUTDATED` answer or a failed read. */
   retryDelays?: readonly number[];
 }
 
 /** What {@link useServerMachine} renders from. */
 export interface UseServerMachineResult<Spec extends MachineSpec> {
-  /** `loading` until the server's first snapshot, `stopped` for good after `gone` or `client-outdated`. */
+  /** `loading` until the server's first snapshot, `stopped` for good after `gone` or `CLIENT_OUTDATED`. */
   status: 'loading' | 'ready' | 'stopped';
   /** The instance id: the one given, or the one the server minted on start. */
   id: string | null;
@@ -58,12 +59,12 @@ export interface UseServerMachineResult<Spec extends MachineSpec> {
   pending: boolean;
   /** The last refusal or transport failure, shown until the next successful event. */
   problem: Problem | null;
-  /** Why the hook stopped: the instance is `gone`, or this page is `client-outdated` and must reload. */
+  /** Why the hook stopped: the instance is `gone`, or this page is `CLIENT_OUTDATED` and must reload. */
   error: ServerMachineError | null;
   /** Sends one event to the server, after every earlier one has settled. Never throws. */
   send<T extends TriggerOf<Spec>>(trigger: T, ...input: InputArgs<Spec, T>): Promise<SendOutcome>;
   /**
-   * Resends what last failed (a transport failure, or `server-outdated` past every retry) under its first requestId,
+   * Resends what last failed (a transport failure, or `SERVER_OUTDATED` past every retry) under its first requestId,
    * so the server replays its result rather than applying it twice: the `start` while there is no instance yet, else
    * the last event that failed, unless a later event has been confirmed since, which supersedes it. `send` again would
    * be a new request. Never throws.
@@ -90,7 +91,7 @@ const LOADING: ServerMachineView<MachineSpec> = {
 
 const NOT_READY: SendOutcome = {
   outcome: 'failed',
-  problem: { kind: 'rejected', code: 'not-ready', message: 'The machine has not opened yet.' },
+  problem: { kind: 'rejected', code: ClientProblemCode.NotReady, message: 'The machine has not opened yet.' },
 };
 
 const noSubscription = () => () => {};
@@ -118,7 +119,7 @@ function sessionWrite(key: string, value: string | null): void {
 function startSettled(view: ServerMachineView<MachineSpec>): boolean {
   if (view.id !== null || view.status === 'stopped') return true;
   const problem = view.problem;
-  return problem !== null && problem.kind !== 'transport' && problem.code !== 'server-outdated';
+  return problem !== null && problem.kind !== 'transport' && problem.code !== RefusalCode.ServerOutdated;
 }
 
 /**
@@ -129,17 +130,18 @@ function startSettled(view: ServerMachineView<MachineSpec>): boolean {
  * - With `id`, the hook opens that instance; without one, it starts a new one with `startInput`, once, under one
  *   requestId even when StrictMode mounts it twice (the server answers a repeated start with the same instance).
  * - It subscribes to the instance's changes before reading it, keeps the newest revision of whatever arrives, and
- *   reads again only after a reconnect, an incarnation change or a `client-divergence`.
- * - `gone` and `client-outdated` stop it for good: `status` is `stopped`, `error` says which, and nothing more is
- *   sent. A page that gets `client-outdated` was built for another version of the machine and must reload.
+ *   reads again only after a reconnect, an incarnation change or a `CLIENT_DIVERGENCE`.
+ * - `gone` and `CLIENT_OUTDATED` stop it for good: `status` is `stopped`, `error` says which, and nothing more is
+ *   sent. A page that gets `CLIENT_OUTDATED` was built for another version of the machine and must reload.
  * - A transport failure is not retried by itself: `retry` resends the failed start or event under its first
  *   requestId, until a later event is confirmed. A start's minted requestId is kept in `sessionStorage` until it
  *   answers (`startStorageKey`).
  * - `dueAt` is shown, never fired: the server runs a state's timer and pushes the result. Null means no timer, or one
  *   the server cleared.
  *
- * Changing `server`, `machine`, `id` or `startRequestId` closes the old instance's stream and opens the new one; unmounting closes it
- * and drops every late answer. Built over the framework-free {@link ServerMachineController}.
+ * Changing `server`, `machine`, `id` or `startRequestId` closes the old instance's stream and opens the new one, and
+ * the hook is `loading` from that render until the new one answers; unmounting closes it and drops every late answer.
+ * Built over the framework-free {@link ServerMachineController}.
  * @see https://traxsharp.net/docs/sdk-reference/statemachine-api/typescript-package#talking-to-a-server
  */
 export function useServerMachine<Spec extends MachineSpec>(
@@ -148,7 +150,14 @@ export function useServerMachine<Spec extends MachineSpec>(
 ): UseServerMachineResult<Spec> {
   const { server, id } = options;
   const givenStartRequestId = id === undefined ? options.startRequestId : undefined;
-  const [controller, setController] = useState<ServerMachineController<Spec> | null>(null);
+  // The controller, with what it was made for: one made for another server, machine or instance is never shown.
+  const [held, setHeld] = useState<{
+    controller: ServerMachineController<Spec>;
+    machine: TypedMachine<Spec>;
+    server: MachineServer;
+    id: string | undefined;
+    startRequestId: string | undefined;
+  } | null>(null);
 
   // The options that may change identity on every render are read when a controller is built, never as triggers.
   const latest = useRef(options);
@@ -199,13 +208,25 @@ export function useServerMachine<Spec extends MachineSpec>(
         forget?.();
       });
     }
-    setController(next);
+    setHeld({ controller: next, machine, server, id, startRequestId: givenStartRequestId });
     void next.start();
     return () => {
       forget?.();
       next.dispose();
     };
   }, [machine, server, id, givenStartRequestId]);
+
+  // Until the effect has made the controller of what is asked for now, the hook is loading: a render between a new
+  // server (configureTrax, another user signing in) and its effect would otherwise show the instance before it, and
+  // send to it, under the new caller.
+  const controller =
+    held !== null &&
+    held.machine === machine &&
+    held.server === server &&
+    held.id === id &&
+    held.startRequestId === givenStartRequestId
+      ? held.controller
+      : null;
 
   const view = useSyncExternalStore(
     controller ? (listener) => controller.subscribe(listener) : noSubscription,

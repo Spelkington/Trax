@@ -99,6 +99,16 @@ public class TraxScheduler(
             manifest.Owner = owner;
     }
 
+    /// <summary>
+    /// Records who the manifest's runs are started for, when the options call <see cref="ScheduleOptions.StartedBy"/>,
+    /// nobody included. Left alone otherwise, so a re-seed that does not call it keeps the starter the manifest has.
+    /// </summary>
+    private static void StampStarter(Manifest manifest, ResolvedOptions resolved)
+    {
+        if (resolved.StarterStated)
+            manifest.StarterHash = resolved.StarterHash;
+    }
+
     private void ValidateTrain(Type trainType, Type inputType) =>
         trainRegistry.ValidateTrainRegistration(trainDiscovery, trainType, inputType);
 
@@ -130,6 +140,7 @@ public class TraxScheduler(
         );
 
         StampOwner(manifest);
+        StampStarter(manifest, resolved);
 
         await context.SaveChanges(ct);
 
@@ -266,6 +277,7 @@ public class TraxScheduler(
         );
 
         StampOwner(manifest);
+        StampStarter(manifest, resolved);
 
         await context.SaveChanges(ct);
 
@@ -539,7 +551,9 @@ public class TraxScheduler(
     /// entry due later than <paramref name="runAt"/> (a retry waiting out its backoff, say) is
     /// brought forward to it. The check and the insert are two statements, so an entry the
     /// ManifestManager or another trigger queues between them is recognised by the insert's
-    /// failure and treated the same way; any other failed save is thrown.
+    /// unique violation and treated the same way. That entry may be dispatched before it is read
+    /// again, and a dispatched entry no longer holds the manifest's place, so the trigger then
+    /// queues its own, a few times at most. Any other failed save is thrown.
     /// </summary>
     private Task<TriggerOutcome> TriggerManifestAsync(
         IDataContext context,
@@ -547,7 +561,15 @@ public class TraxScheduler(
         DateTime runAt,
         bool askAfresh,
         CancellationToken ct
-    ) => TriggerManifestAsync(context, manifest, runAt, askAfresh, BeforeTriggerRelease, ct);
+    ) =>
+        TriggerManifestAsync(
+            context,
+            manifest,
+            runAt,
+            askAfresh,
+            new TriggerSeams(BeforeTriggerRelease, BeforeTriggerInsert, AfterTriggerCollision),
+            ct
+        );
 
     /// <summary>
     /// The trigger itself, for <see cref="TriggerManifestAsync(IDataContext, Manifest, DateTime, bool, CancellationToken)"/>
@@ -560,65 +582,96 @@ public class TraxScheduler(
         Manifest manifest,
         DateTime runAt,
         bool askAfresh,
-        Func<long, CancellationToken, Task>? beforeRelease,
+        TriggerSeams? seams,
         CancellationToken ct
     )
     {
-        if (
-            await ReleaseQueuedEntryAsync(
-                context,
-                manifest.Id,
-                runAt,
-                askAfresh,
-                beforeRelease,
-                ct
-            ) is
-            { } queued
-        )
-            return queued;
-
-        // An immediate trigger stores no time, as it always has; a delayed one stores its time.
-        DateTime? scheduledAt = runAt > DateTime.UtcNow ? runAt : null;
-        var entry = WorkQueue.Create(
-            new CreateWorkQueue
-            {
-                TrainName = manifest.Name,
-                Input = manifest.Properties,
-                InputTypeName = manifest.PropertyTypeName,
-                ManifestId = manifest.Id,
-                Priority = manifest.Priority,
-                ScheduledAt = scheduledAt,
-                ExplicitTrigger = true,
-            }
-        );
-        context.WorkQueues.Add(entry);
-
-        try
+        for (var attempt = 1; ; attempt++)
         {
-            await context.SaveChanges(ct);
-            return new TriggerOutcome(entry.Id, Created: true, MovedForward: false, scheduledAt);
-        }
-        catch (DbUpdateException)
-        {
-            // Untracked either way, so a later save on this context does not retry it.
-            context.Reset();
-
             if (
                 await ReleaseQueuedEntryAsync(
                     context,
                     manifest.Id,
                     runAt,
                     askAfresh,
-                    beforeRelease,
+                    seams?.BeforeRelease,
                     ct
                 ) is
-                { } raced
+                { } queued
             )
-                return raced;
+                return queued;
 
-            throw;
+            // An immediate trigger stores no time, as it always has; a delayed one stores its time.
+            DateTime? scheduledAt = runAt > DateTime.UtcNow ? runAt : null;
+            var entry = WorkQueue.Create(
+                new CreateWorkQueue
+                {
+                    TrainName = manifest.Name,
+                    Input = manifest.Properties,
+                    InputTypeName = manifest.PropertyTypeName,
+                    ManifestId = manifest.Id,
+                    StarterHash = manifest.StarterHash,
+                    Priority = manifest.Priority,
+                    ScheduledAt = scheduledAt,
+                    ExplicitTrigger = true,
+                }
+            );
+            context.WorkQueues.Add(entry);
+
+            try
+            {
+                if (seams?.BeforeInsert is { } beforeInsert)
+                    await beforeInsert(attempt, ct);
+                await context.SaveChanges(ct);
+                return new TriggerOutcome(
+                    entry.Id,
+                    Created: true,
+                    MovedForward: false,
+                    scheduledAt
+                );
+            }
+            catch (DbUpdateException ex) when (RetryReplayLinks.IsQueuedManifestConflict(ex))
+            {
+                // Untracked, so a later save on this context does not retry it, also when the
+                // trigger gives up here. The entry it met is read on the next pass, or, if the
+                // dispatcher took it meanwhile, queued afresh.
+                context.Reset();
+                if (attempt >= MaxTriggerAttempts)
+                    throw;
+                if (seams?.AfterCollision is { } afterCollision)
+                    await afterCollision(attempt, ct);
+            }
+            catch
+            {
+                // Any other failure, a cancel included, is not tried again. The entry is untracked so a later save on
+                // this context does not insert it after all.
+                context.WorkQueues.Entry(entry).State = EntityState.Detached;
+                throw;
+            }
         }
     }
+
+    // How many times a trigger inserts before it gives up on a manifest whose queued entry keeps being dispatched
+    // between the insert and the read.
+    private const int MaxTriggerAttempts = 3;
+
+    /// <summary>
+    /// Test seam: awaited with the attempt number just before a trigger inserts its own entry.
+    /// </summary>
+    internal Func<int, CancellationToken, Task>? BeforeTriggerInsert { get; set; }
+
+    /// <summary>
+    /// Test seam: awaited with the attempt number after a trigger's insert met the manifest's queued
+    /// entry and before it reads that entry again.
+    /// </summary>
+    internal Func<int, CancellationToken, Task>? AfterTriggerCollision { get; set; }
+
+    /// <summary>The test seams a trigger awaits; null in production.</summary>
+    internal sealed record TriggerSeams(
+        Func<long, CancellationToken, Task>? BeforeRelease,
+        Func<int, CancellationToken, Task>? BeforeInsert,
+        Func<int, CancellationToken, Task>? AfterCollision
+    );
 
     /// <summary>
     /// Test seam: awaited with the entry's id between a trigger reading the manifest's queued entry
@@ -769,6 +822,7 @@ public class TraxScheduler(
         );
 
         StampOwner(manifest);
+        StampStarter(manifest, resolved);
 
         await context.SaveChanges(ct);
 
@@ -919,6 +973,7 @@ public class TraxScheduler(
         );
 
         StampOwner(manifest);
+        StampStarter(manifest, resolved);
 
         await context.SaveChanges(ct);
 
@@ -959,6 +1014,7 @@ public class TraxScheduler(
         );
 
         StampOwner(manifest);
+        StampStarter(manifest, resolved);
 
         await context.SaveChanges(ct);
 
@@ -1010,6 +1066,7 @@ public class TraxScheduler(
         );
 
         StampOwner(manifest);
+        StampStarter(manifest, resolved);
 
         await context.SaveChanges(ct);
 
@@ -1797,6 +1854,7 @@ public class TraxScheduler(
                 Input = manifest.Properties,
                 InputTypeName = manifest.PropertyTypeName,
                 ManifestId = manifest.Id,
+                StarterHash = manifest.StarterHash,
                 Priority = manifest.Priority,
                 DeadLetterId = deadLetter.Id,
                 // An operator asked for this run by name, so it runs while the manifest is disabled.
@@ -1885,7 +1943,9 @@ public class TraxScheduler(
                 PriorityIfNew: manifestOptions.Priority
             ),
             PrunePrefix: opts._prunePrefix,
-            BatchName: opts._batchName
+            BatchName: opts._batchName,
+            StarterHash: opts._starterHash,
+            StarterStated: opts._starterStated
         );
     }
 
@@ -1973,6 +2033,8 @@ public class TraxScheduler(
         string? GroupId,
         ManifestGroupSeed Group,
         string? PrunePrefix,
-        string? BatchName
+        string? BatchName,
+        string? StarterHash,
+        bool StarterStated
     );
 }

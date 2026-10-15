@@ -1,3 +1,4 @@
+import type { ProblemCode } from '../results';
 /**
  * The client half of "one set of operations, any machine".
  *
@@ -13,8 +14,8 @@
 
 /** A typed refusal returned as DATA (HTTP 200, no GraphQL `errors`), never a thrown transport failure. */
 export interface SnapshotProblem {
-  /** A contract code: `guard-failed`, `invalid-context`, `schema-mismatch`, `draft-committed`, … */
-  code: string;
+  /** A contract code: `GUARD_FAILED`, `INVALID_CONTEXT`, `SCHEMA_MISMATCH`, `DRAFT_COMMITTED`, … */
+  code: ProblemCode;
   message: string;
 }
 
@@ -100,7 +101,7 @@ export interface AdvanceOptions {
   /**
    * The snapshot the LOCAL twin computed for this same advance, as canonical JSON. When present the
    * server compares it against its own authoritative result and refuses a divergence with
-   * `client-divergence`, rather than storing a snapshot the two engines don't agree on.
+   * `CLIENT_DIVERGENCE`, rather than storing a snapshot the two engines don't agree on.
    */
   clientResult?: string;
 }
@@ -112,7 +113,7 @@ const EMPTY: SnapshotOutput = { snapshot: null, problem: null };
  * is the layer that pins one (machine, id) pair.
  *
  * `schemaHash` is threaded through every call because the server's version-skew handshake is per-request:
- * a client whose machine has drifted from the deployed one is refused with `schema-mismatch` (telling it
+ * a client whose machine has drifted from the deployed one is refused with `SCHEMA_MISMATCH` (telling it
  * to reload) instead of writing under an outdated contract. Omitting it opts out of the check.
  * @see https://traxsharp.net/docs/sdk-reference/statemachine-api/typescript-package#talking-to-a-server
  */
@@ -154,19 +155,7 @@ export function createSnapshotClient(execute: SnapshotExecutor): SnapshotClient 
   };
 }
 
-// ── The zero-dependency executor ──────────────────────────────────────────────────────────────────
-
-const OUTPUT = 'output { snapshot problem { code message } }';
-
-const MUTATIONS: Record<SnapshotOperation, string> = {
-  startSnapshot: `mutation($i: StartSnapshotInput!){ dispatch { stateMachine { startSnapshot(input:$i){ output { id created snapshot problem { code message } } } } } }`,
-  saveSnapshot: `mutation($i: SaveSnapshotInput!){ dispatch { stateMachine { saveSnapshot(input:$i){ ${OUTPUT} } } } }`,
-  advanceSnapshot: `mutation($i: AdvanceSnapshotInput!){ dispatch { stateMachine { advanceSnapshot(input:$i){ ${OUTPUT} } } } }`,
-  loadSnapshot: `mutation($i: LoadSnapshotInput!){ dispatch { stateMachine { loadSnapshot(input:$i){ ${OUTPUT} } } } }`,
-  sendSnapshot: `mutation($i: SendSnapshotInput!){ dispatch { stateMachine { sendSnapshot(input:$i){ ${OUTPUT} } } } }`,
-  discardSnapshot: `mutation($i: DiscardSnapshotInput!){ dispatch { stateMachine { discardSnapshot(input:$i){ output { discarded problem { code message } } } } } }`,
-};
-
+/** How a request reaches the host: the headers each one carries, and the `fetch` it is sent with. */
 export interface HttpExecutorOptions {
   /** Extra headers per request — auth, typically. Called per call so a rotating token stays fresh. */
   headers?: () => Record<string, string>;
@@ -174,35 +163,3 @@ export interface HttpExecutorOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-/**
- * An executor over plain `fetch` for a host with no GraphQL client. It builds the six documents itself,
- * so nothing outside this file needs to know their text. A host that already has generated typed
- * documents should write a five-line executor against those instead of using this.
- * @see https://traxsharp.net/docs/sdk-reference/statemachine-api/typescript-package#talking-to-a-server
- */
-export function createHttpExecutor(
-  endpoint: string,
-  options: HttpExecutorOptions = {},
-): SnapshotExecutor {
-  const doFetch = options.fetch ?? globalThis.fetch;
-
-  return async (operation, input) => {
-    const response = await doFetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...options.headers?.() },
-      body: JSON.stringify({ query: MUTATIONS[operation], variables: { i: input } }),
-    });
-
-    const body = (await response.json()) as {
-      data?: { dispatch?: { stateMachine?: Record<string, { output?: SnapshotOutput }> } };
-      errors?: { message: string }[];
-    };
-
-    // A GraphQL error is transport-level (an auth refusal arrives this way, at HTTP 200) — distinct from
-    // a typed problem, which is data. Throwing keeps that distinction: the session maps it to a problem.
-    if (body.errors?.length) throw new Error(body.errors[0].message);
-    const output = body.data?.dispatch?.stateMachine?.[operation]?.output;
-    // A discard's output carries no snapshot; every output has the same fields to its callers.
-    return output ? { ...output, snapshot: output.snapshot ?? null } : null;
-  };
-}

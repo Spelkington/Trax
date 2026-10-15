@@ -89,13 +89,11 @@ public class PersistedOperationPolicyTests
     {
         // Persisting the upload mutation by id would be a chicken-and-egg.
         Decide(
-                Build(b => b.RequirePersisted(true)),
+                Build(b => b.RequirePersisted(true).GateManagement(roles: "admin")),
                 """
                 mutation {
-                  operations {
-                    persistedOperations {
-                      uploadPersistedOperation(input: { id: "x", document: "{ x }" }) { success }
-                    }
+                  persistedOperations {
+                    uploadPersistedOperation(input: { id: "x", document: "{ x }" }) { success }
                   }
                 }
                 """
@@ -108,11 +106,69 @@ public class PersistedOperationPolicyTests
     public void ManagementQuery_PassesThrough()
     {
         Decide(
+                Build(b => b.RequirePersisted(true).GateManagement(roles: "admin")),
+                "query { persistedOperations { persistedOperations { totalCount } } }"
+            )
+            .Should()
+            .Be(PersistedOperationDecision.PassThrough);
+    }
+
+    [Test]
+    public void Without_a_management_gate_a_root_persistedOperations_document_is_not_carved_out()
+    {
+        // The management fields are not served, so a root field of that name is the host's own
+        // and gets no pass from this package.
+        Decide(
+                Build(b => b.RequirePersisted(true)),
+                "query { persistedOperations { persistedOperations { totalCount } } }"
+            )
+            .Should()
+            .Be(PersistedOperationDecision.Reject);
+    }
+
+    [Test]
+    public void ManagementUnderTheOperationsNamespace_IsRejected()
+    {
+        Decide(
                 Build(b => b.RequirePersisted(true)),
                 "query { operations { persistedOperations { persistedOperations { totalCount } } } }"
             )
             .Should()
-            .Be(PersistedOperationDecision.PassThrough);
+            .Be(
+                PersistedOperationDecision.Reject,
+                "the management fields live at the root, and operations holds nothing of them"
+            );
+    }
+
+    [Test]
+    public void AnInlineOperationsRead_IsRejected()
+    {
+        Decide(
+                Build(b => b.RequirePersisted(true)),
+                "query { operations { machineDocuments { id } } }"
+            )
+            .Should()
+            .Be(
+                PersistedOperationDecision.Reject,
+                "the only inline carve-out is root persistedOperations; a client reads machine document ids "
+                    + "from the exported client manifest"
+            );
+    }
+
+    [Test]
+    public void ManagementMixedWithAnOperationsRead_IsRejected()
+    {
+        Decide(
+                Build(b => b.RequirePersisted(true)),
+                """
+                query {
+                  persistedOperations { persistedOperations { totalCount } }
+                  operations { executions { totalCount } }
+                }
+                """
+            )
+            .Should()
+            .Be(PersistedOperationDecision.Reject);
     }
 
     [Test]
@@ -141,18 +197,16 @@ public class PersistedOperationPolicyTests
     }
 
     [Test]
-    public void ManagementMixedWithAnotherNamespace_IsRejected()
+    public void ManagementMixedWithAnotherRootField_IsRejected()
     {
         Decide(
                 Build(b => b.RequirePersisted(true)),
                 """
                 mutation {
-                  operations {
-                    persistedOperations {
-                      uploadPersistedOperation(input: { id: "x", document: "{ x }" }) { success }
-                    }
-                    deadLetters { totalCount }
+                  persistedOperations {
+                    uploadPersistedOperation(input: { id: "x", document: "{ x }" }) { success }
                   }
+                  operations { deadLetters { totalCount } }
                 }
                 """
             )
@@ -163,7 +217,7 @@ public class PersistedOperationPolicyTests
     [Test]
     public void DocumentThatDoesNotParse_IsRejected()
     {
-        Decide(Build(b => b.RequirePersisted(true)), "query { operations { persistedOperations {")
+        Decide(Build(b => b.RequirePersisted(true)), "query { persistedOperations {")
             .Should()
             .Be(PersistedOperationDecision.Reject);
     }

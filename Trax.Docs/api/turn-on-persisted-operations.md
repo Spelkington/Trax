@@ -47,35 +47,35 @@ builder.Services.AddTrax(trax =>
 builder.Services.AddTraxGraphQL(graphql =>
     graphql
         .UsePersistedOperations(opts =>
-            opts.RequirePersisted(false).LogNonPersistedRequests(true).SingleNode()
+            opts.RequirePersisted(false)
+                .LogNonPersistedRequests(true)
+                .SingleNode()
+                .GateManagement(roles: "Deployer")
         )
-        .GateOperations(roles: "Operator")
 );
 ```
 
 - `SingleNode()` says one process serves the endpoint and writes the store. With more than one
   node, use step 6 instead. The host refuses to start with neither, or with both.
-- `UsePersistedOperations` exposes the `operations` namespace, which holds the management
-  mutations. `GateOperations` limits it to a role or policy; the host refuses to start until the
-  namespace has a posture. The choices are in
-  [Authorization rules](/docs/authorization).
+- `GateManagement` serves the management fields, `persistedOperations { ... }` at the root, to a
+  role or policy. Without it they are not in the schema. It is a gate of its own: the uploader
+  needs this role and nothing under `operations`, which `UsePersistedOperations` does not expose.
+  The other choices are in [Authorization rules](/docs/authorization).
 - `RequirePersisted(false)` without `LogNonPersistedRequests(true)` does nothing, and the host
   refuses to start.
 
 ## 3. Upload the documents your clients send
 
 Each client's build produces a manifest of ids and documents. Upload it before the clients that
-use it ship, from CI or a deploy step. Over GraphQL, as a caller the `operations` posture admits:
+use it ship, from CI or a deploy step. Over GraphQL, as a caller the management gate admits:
 
 ```graphql
 mutation Upload($input: UploadPersistedOperationInput!) {
-  operations {
-    persistedOperations {
-      uploadPersistedOperation(input: $input) {
-        success
-        operation { id shapeFingerprint isActive }
-        errors { code message }
-      }
+  persistedOperations {
+    uploadPersistedOperation(input: $input) {
+      success
+      operation { id shapeFingerprint isActive }
+      errors { code message }
     }
   }
 }
@@ -131,8 +131,9 @@ using Trax.Api.GraphQL.PersistedOperations.Extensions;
 
 builder.Services.AddTraxGraphQL(graphql =>
     graphql
-        .UsePersistedOperations(opts => opts.RequirePersisted(true).SingleNode())
-        .GateOperations(roles: "Operator")
+        .UsePersistedOperations(opts =>
+            opts.RequirePersisted(true).SingleNode().GateManagement(roles: "Deployer")
+        )
 );
 ```
 
@@ -151,12 +152,11 @@ builder.Services.AddTraxGraphQL(graphql =>
     graphql
         .UsePersistedOperations(opts =>
         {
-            opts.RequirePersisted(true).SingleNode();
+            opts.RequirePersisted(true).SingleNode().GateManagement(roles: "Deployer");
             if (builder.Environment.IsDevelopment())
                 opts.AllowOperations("playground_smoke_test")
                     .AllowOperationsMatching(name => name.StartsWith("dev_"));
         })
-        .GateOperations(roles: "Operator")
 );
 ```
 
@@ -178,8 +178,8 @@ builder.Services.AddTraxGraphQL(graphql =>
             opts.RequirePersisted(true)
                 .UseRabbitMqInvalidation(rabbitMqConnectionString)
                 .WithCacheMaxAge(TimeSpan.FromMinutes(2))
+                .GateManagement(roles: "Deployer")
         )
-        .GateOperations(roles: "Operator")
 );
 ```
 
@@ -196,10 +196,14 @@ Every builder method is on
 ## 7. Manage operations from the dashboard
 
 With the [dashboard](/docs/dashboard) on the host, a **Persisted Operations** entry appears under
-**Data** whenever `IPersistedOperationsService` is registered: by `UsePersistedOperations(...)` on a
-GraphQL host, or by `AddPersistedOperationStore(...)` on a dashboard host that serves no GraphQL.
-Without either, the entry is hidden and `/trax/data/persisted-operations` shows a "not enabled on
-this server" panel.
+**Data** once the host turns on persisted operations, with `UsePersistedOperations(...)` on a
+GraphQL host or `AddPersistedOperationStore(...)` on a dashboard host that serves no GraphQL, and
+declares the management gate with `GateManagement(...)`. Without both, the entry is hidden and
+`/trax/data/persisted-operations` says management is not served on this server.
+
+The pages hold the operator to the same gate as the `persistedOperations` fields: every read and
+write checks the dashboard's own posture, then the gate's policy and roles. An operator at the
+dashboard who manages documents needs both, as one at the React dashboard does.
 
 The page lists `trax.persisted_operation` a page at a time, filters by tenant, status and id
 prefix, and uploads, edits, deactivates and restores against the row's own tenant. It goes through
@@ -215,7 +219,7 @@ an uploader does:
 using Trax.Api.GraphQL.PersistedOperations.Extensions;
 
 builder.Services.AddPersistedOperationStore(store =>
-    store.UseRabbitMqInvalidation(rabbitMqConnectionString)
+    store.UseRabbitMqInvalidation(rabbitMqConnectionString).GateManagement(roles: "Deployer")
 );
 ```
 

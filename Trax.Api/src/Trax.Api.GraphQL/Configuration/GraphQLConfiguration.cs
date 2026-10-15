@@ -140,6 +140,15 @@ public class GraphQLConfiguration
     internal bool GetRequestsAllowed { get; init; }
 
     /// <summary>
+    /// The fields a feature package adds to both root types, the persisted-operation management
+    /// fields. The root types are built for them, and the census reserves their names.
+    /// </summary>
+    internal IReadOnlySet<string> FeatureRootFields { get; init; } = new HashSet<string>();
+
+    /// <summary>Whether a feature package adds fields of its own to both root types.</summary>
+    internal bool FeatureRootFieldsAdded => FeatureRootFields.Count > 0;
+
+    /// <summary>
     /// Whether broadcast subscribers see the answers on <c>onJunctionEvent</c>, set by
     /// <c>TraxGraphQLBuilder.AllowJunctionAnswersForBroadcastSubscribers()</c>. Off by default.
     /// </summary>
@@ -156,6 +165,12 @@ public class GraphQLConfiguration
     /// <c>null</c> when the host's CORS default policy decides which origins may open a socket.
     /// </summary>
     internal IReadOnlyList<string>? SocketAllowedOrigins { get; init; }
+
+    /// <summary>
+    /// The enums <c>ShareEnumWithMachines</c> named: a field outside the machines root may carry them although a served
+    /// machine spells them as the server stores them.
+    /// </summary>
+    internal IReadOnlySet<Type> MachineSpelledEnums { get; init; } = new HashSet<Type>();
 
     /// <summary>
     /// Creates the configuration. <see cref="Trax.Api.GraphQL.Configuration.TraxGraphQLBuilder.TraxGraphQLBuilder"/>

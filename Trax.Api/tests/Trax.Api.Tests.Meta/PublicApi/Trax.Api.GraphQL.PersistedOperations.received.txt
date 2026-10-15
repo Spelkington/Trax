@@ -32,6 +32,8 @@ namespace Trax.Api.GraphQL.PersistedOperations.Configuration
     }
     public sealed class PersistedOperationStoreBuilder
     {
+        public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationStoreBuilder GateManagement(string? policy = null, string? roles = null) { }
+        public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationStoreBuilder GateManagementToAuthenticatedUsers() { }
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationStoreBuilder SingleNode() { }
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationStoreBuilder UseRabbitMqInvalidation(string connectionString) { }
     }
@@ -40,7 +42,8 @@ namespace Trax.Api.GraphQL.PersistedOperations.Configuration
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder AllowOperations(params string[] operationNames) { }
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder AllowOperationsMatching(System.Func<string, bool> predicate) { }
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder DisableIntrospection() { }
-        public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder ExposeOperationsNamespace(bool expose = true) { }
+        public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder GateManagement(string? policy = null, string? roles = null) { }
+        public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder GateManagementToAuthenticatedUsers() { }
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder KeepOlderMachineDocumentsFor(System.TimeSpan grace) { }
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder LogNonPersistedRequests(bool log = true) { }
         public Trax.Api.GraphQL.PersistedOperations.Configuration.PersistedOperationsBuilder RequirePersisted(bool require = true) { }
@@ -62,8 +65,8 @@ namespace Trax.Api.GraphQL.PersistedOperations.Configuration
         public System.TimeSpan CacheTtl { get; }
         [System.Obsolete("Not used: persisted operations read and write through the Trax data context.")]
         public string DatabaseConnectionString { get; }
-        public bool ExposeOperationsNamespace { get; }
         public bool LogNonPersistedRequests { get; }
+        public bool ManagementServed { get; }
         public string? RabbitMqConnectionString { get; }
         public bool RequirePersisted { get; }
         public bool SingleNode { get; }
@@ -82,6 +85,10 @@ namespace Trax.Api.GraphQL.PersistedOperations.Extensions
             "e Trax data context. Use AddPersistedOperationStore(store => store.UseRabbitMqIn" +
             "validation(...)).")]
         public static Microsoft.Extensions.DependencyInjection.IServiceCollection AddPersistedOperationStore(this Microsoft.Extensions.DependencyInjection.IServiceCollection services, string databaseConnectionString, string rabbitMqInvalidationConnectionString) { }
+    }
+    public static class TraxClientManifestExtensions
+    {
+        public static System.Threading.Tasks.Task RunTraxAsync(this Microsoft.AspNetCore.Builder.WebApplication app, string[]? args = null) { }
     }
     public static class TraxGraphQLBuilderPersistedOperationsExtensions
     {
@@ -228,6 +235,11 @@ namespace Trax.Api.GraphQL.PersistedOperations
 }
 namespace Trax.Api.GraphQL.PersistedOperations.Services
 {
+    public interface IPersistedOperationsManagementGate
+    {
+        bool IsDeclared { get; }
+        System.Threading.Tasks.Task<bool> AllowsAsync(System.Security.Claims.ClaimsPrincipal user, System.Threading.CancellationToken ct = default);
+    }
     public interface IPersistedOperationsService
     {
         System.Threading.Tasks.Task<Trax.Api.GraphQL.PersistedOperations.GraphQL.Models.DeactivatePersistedOperationPayload> DeactivateAsync(Trax.Api.GraphQL.PersistedOperations.GraphQL.Models.DeactivatePersistedOperationInput input, System.Threading.CancellationToken ct);

@@ -7,6 +7,7 @@ using Trax.Effect.Data.Services.DataContextTransaction;
 using Trax.Effect.Data.Services.IDataContextFactory;
 using Trax.Effect.Data.Services.SqlDialect;
 using Trax.Effect.Enums;
+using Trax.Effect.Models;
 using Trax.Effect.Models.WorkQueue.DTOs;
 
 namespace Trax.Effect.StateMachine.Persistence;
@@ -42,7 +43,7 @@ internal abstract record InvokeWrite
     public sealed record Conflict : InvokeWrite;
 
     /// <summary>The write was refused; nothing was written.</summary>
-    public sealed record Refused(string Code, string Message, Exception? Exception = null)
+    public sealed record Refused(RefusalCode Code, string Message, Exception? Exception = null)
         : InvokeWrite;
 
     private InvokeWrite() { }
@@ -77,7 +78,7 @@ internal abstract record CreateWrite
     public sealed record Conflict : CreateWrite;
 
     /// <summary>The create was refused; nothing was written.</summary>
-    public sealed record Refused(string Code, string Message, Exception? Exception = null)
+    public sealed record Refused(RefusalCode Code, string Message, Exception? Exception = null)
         : CreateWrite;
 
     private CreateWrite() { }
@@ -102,16 +103,16 @@ internal abstract record CreateWrite
 internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServiceProvider services)
 {
     /// <summary>The code an entry past the owner's live-run cap is refused with.</summary>
-    public const string LimitReached = "invoke-limit-reached";
+    public const RefusalCode LimitReached = RefusalCode.InvokeLimitReached;
 
     /// <summary>The code an entry is refused with when the entering user may not run the state's train.</summary>
-    public const string Forbidden = "invoke-forbidden";
+    public const RefusalCode Forbidden = RefusalCode.InvokeForbidden;
 
     /// <summary>
     /// The code an outcome is refused with when it enters an invoking state of a user-owned instance: only a
     /// system-owned instance chains runs through outcomes.
     /// </summary>
-    public const string ChainRefused = "invoke-chain-user-owned";
+    public const RefusalCode ChainRefused = RefusalCode.InvokeChainUserOwned;
 
     /// <summary>
     /// Writes <paramref name="next"/> over <paramref name="owner"/>'s row, guarded by <paramref name="expectedToken"/>,
@@ -459,7 +460,7 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
             );
             if (held >= limit.Max)
                 return new CreateWrite.Refused(
-                    DraftRefusalCodes.TooManyDrafts,
+                    RefusalCode.TooManyDrafts,
                     $"You already have {held} drafts, the most allowed. Finish or discard one, then try again."
                 );
         }
@@ -524,7 +525,7 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
         catch (Exception ex)
         {
             return new InvokeWrite.Refused(
-                RejectionReasons.InternalError,
+                RefusalCode.InternalError,
                 "The step's work could not be started.",
                 ex
             );
@@ -532,7 +533,7 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
 
         if (input is null)
             return new InvokeWrite.Refused(
-                RejectionReasons.InternalError,
+                RefusalCode.InternalError,
                 "The step's work could not be started.",
                 new InvalidOperationException(
                     $"The input mapping of {entering.TrainType.Name} in '{snapshot.Machine}' state "
@@ -550,6 +551,10 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
             )
             {
                 FromOutcome = fromOutcome,
+                StarterHash =
+                    owner.Kind == SnapshotOwnerKind.User
+                        ? RunStarter.OfUserKey(owner.UserKey)
+                        : null,
             }
         );
     }
@@ -560,7 +565,8 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
     // whose state is left now (leavingToken) is cancelled in this transaction, so it does not. The count is taken
     // under a transaction-scoped lock on the user on Postgres, so two concurrent entries by one user, on any hosts
     // and in any machines, cannot both pass it; SQLite serializes writing transactions already (BEGIN IMMEDIATE).
-    private async Task<InvokeWrite.Refused?> OverLimit(
+    // A user owner whose key names nobody cannot be counted, so it is refused rather than let past the cap.
+    internal async Task<InvokeWrite.Refused?> OverLimit(
         IDataContext context,
         DraftOwner owner,
         string? leavingToken,
@@ -568,8 +574,17 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
         CancellationToken cancellationToken
     )
     {
-        if (owner.Kind != SnapshotOwnerKind.User || owner.UserKey is not { } userKey)
+        if (owner.Kind != SnapshotOwnerKind.User)
             return null;
+        if (owner.UserKey is not { } userKey || RunStarter.OfUserKey(userKey) is not { } starter)
+            return new InvokeWrite.Refused(
+                Forbidden,
+                "The step's work could not be started.",
+                new InvalidOperationException(
+                    "A user-owned instance with no user key entered a state that invokes a train, so its live runs "
+                        + "cannot be counted against the cap."
+                )
+            );
 
         if (services.GetService<ISqlDialect>() is { } dialect && context is DbContext db)
             await db.Database.ExecuteSqlRawAsync(
@@ -578,7 +593,8 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
                 cancellationToken
             );
 
-        // A run names the instance that queued it, not the user, so it is joined to the user's instances.
+        // A run records its starter, the instance's owner, so it is counted even after a draft lifetime deleted the
+        // instance. A run written before the starter was recorded is joined to the user's instances, as it was.
         var instances = context.SnapshotDrafts.Where(x =>
             x.OwnerKind == SnapshotOwnerKind.User && x.UserKey == userKey
         );
@@ -587,20 +603,31 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
                 w.InvokingOwnerKind == SnapshotOwnerKind.User
                 && w.Status == WorkQueueStatus.Queued
                 && w.ExternalId != leavingToken
-                && instances.Any(x =>
-                    x.Id == w.InvokingInstanceId && x.Machine == w.InvokingMachine
+                && (
+                    w.StarterHash == starter
+                    || (
+                        w.StarterHash == null
+                        && instances.Any(x =>
+                            x.Id == w.InvokingInstanceId && x.Machine == w.InvokingMachine
+                        )
+                    )
                 ),
             cancellationToken
         );
-        var running = await context.Metadatas.CountAsync(
-            m =>
-                m.InvokingOwnerKind == SnapshotOwnerKind.User
-                && (m.TrainState == TrainState.Pending || m.TrainState == TrainState.InProgress)
-                && instances.Any(x =>
-                    x.Id == m.InvokingInstanceId && x.Machine == m.InvokingMachine
-                ),
-            cancellationToken
-        );
+        // Two counts, so the one by starter reads ix_metadata_live_invoked_starter (083): an OR with the legacy branch
+        // does not imply that index's predicate, and the planner would fall back to the older ones.
+        var running =
+            await LiveRunsStartedBy(context, starter).CountAsync(cancellationToken)
+            + await context.Metadatas.CountAsync(
+                m =>
+                    m.StarterHash == null
+                    && m.InvokingOwnerKind == SnapshotOwnerKind.User
+                    && (m.TrainState == TrainState.Pending || m.TrainState == TrainState.InProgress)
+                    && instances.Any(x =>
+                        x.Id == m.InvokingInstanceId && x.Machine == m.InvokingMachine
+                    ),
+                cancellationToken
+            );
 
         var live = queued + running;
         return live >= limit
@@ -611,6 +638,18 @@ internal sealed class InvokeOutbox(IDataContextProviderFactory contexts, IServic
             )
             : null;
     }
+
+    // The runs a user's instances invoked that have not ended, by the starter they recorded. Shaped to match the
+    // predicate of ix_metadata_live_invoked_starter.
+    internal static IQueryable<Trax.Effect.Models.Metadata.Metadata> LiveRunsStartedBy(
+        IDataContext context,
+        string starter
+    ) =>
+        context.Metadatas.Where(m =>
+            m.StarterHash == starter
+            && m.InvokingOwnerKind == SnapshotOwnerKind.User
+            && (m.TrainState == TrainState.Pending || m.TrainState == TrainState.InProgress)
+        );
 
     // The store a write goes through: on the write's own context, recording the IR hash of the definition that made
     // it and what it does to the row's timer, as the scoped store does.

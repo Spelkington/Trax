@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Trax.Effect.Attributes;
+using Trax.Effect.Configuration.ClientExport;
 
 namespace Trax.Effect.StateMachine.Persistence;
 
@@ -8,9 +9,9 @@ namespace Trax.Effect.StateMachine.Persistence;
 /// Refuses to start a host that serves a machine to clients without a rule for everything a client can do to it. A
 /// machine a client can reach is one marked <see cref="Trax.Effect.Attributes.TraxMachineAttribute"/>, however it was
 /// registered, or, while the generic mutations are opted in, every user-owned machine. Each must declare a rule for
-/// every client and effect-bound event, for its <c>start</c>, <c>get</c>, <c>machineChanged</c> and <c>discard</c>; none of its events or
+/// every client and effect-bound event, for its <c>start</c>, <c>get</c>, the push (<c>&lt;machine&gt;Changed</c>) and <c>discard</c>; none of its events or
 /// its start may be <c>Anonymous()</c>, since a user's instance needs an owner; a read or the discard may not be looser
-/// than owner-only; and every
+/// than owner-only; the push may not admit a caller <c>get</c> refuses; and every
 /// policy a rule names must be registered. A marked machine must also have an IR (no raw delegates, no delegate
 /// guard or reducer beside declarative ones) and be user-owned. A machine nothing serves needs no rules. Every
 /// problem of every machine is listed in one refusal.
@@ -22,7 +23,7 @@ internal sealed class MachineRulesStartupValidator(
     IEnumerable<IMachine> machines,
     StateMachineOptions options,
     IServiceScopeFactory scopeFactory
-) : IHostedLifecycleService
+) : IHostedLifecycleService, ITraxStartupCheck
 {
     private bool _checked;
 
@@ -156,6 +157,15 @@ internal sealed class MachineRulesStartupValidator(
         return problems;
     }
 
+    // Whether every caller narrow admits, wide admits too: each role set of wide is met by holding any role of some
+    // set of narrow, and narrow requires every policy wide does. Both are owner-only rules.
+    private static bool Narrows(CallerRule narrow, CallerRule wide) =>
+        wide.RoleSets.All(wideSet =>
+            narrow.RoleSets.Any(narrowSet =>
+                narrowSet.All(role => wideSet.Contains(role, StringComparer.Ordinal))
+            )
+        ) && wide.Policies.All(policy => narrow.Policies.Contains(policy, StringComparer.Ordinal));
+
     // The nearest base type of a machine that carries the attribute itself, or null.
     private static Type? MarkedBase(Type machine)
     {
@@ -186,14 +196,14 @@ internal sealed class MachineRulesStartupValidator(
         if (rules.Get is null)
             undeclared.Add("get");
         if (rules.Watch is null)
-            undeclared.Add("machineChanged");
+            undeclared.Add("changed");
         if (rules.Discard is null)
             undeclared.Add("discard");
         if (undeclared.Count > 0)
             problems.Add(
                 $"The machine '{name}' is {reach}, and declares no rule for {string.Join(", ", undeclared)}. "
                     + "Every event a client can send declares Requires(...), RequiresPolicy(...), AnyAuthenticated() "
-                    + "or Anonymous(), and start, get, machineChanged and discard declare theirs with Start(...), "
+                    + "or Anonymous(), and start, get, the push (changed) and discard declare theirs with Start(...), "
                     + "Get(...), Watch(...) and Discard(...). There is no machine-level default."
             );
 
@@ -215,7 +225,7 @@ internal sealed class MachineRulesStartupValidator(
             var (read, rule) in new[]
             {
                 ("get", rules.Get),
-                ("machineChanged", rules.Watch),
+                ("changed", rules.Watch),
                 ("discard", rules.Discard),
             }
         )
@@ -225,6 +235,19 @@ internal sealed class MachineRulesStartupValidator(
                         + "Owner-only is the floor for reading or discarding an instance: declare OwnerOnly(), and "
                         + "Requires(...) or RequiresPolicy(...) beside it to narrow it further."
                 );
+
+        // The push carries the whole instance, as get answers it, so a watch rule that admits a caller get refuses
+        // would stream what get withholds.
+        if (
+            rules.Get is { Kind: CallerRuleKind.OwnerOnly } get
+            && rules.Watch is { Kind: CallerRuleKind.OwnerOnly } watch
+            && !Narrows(watch, get)
+        )
+            problems.Add(
+                $"The machine '{name}' is {reach}, and its changed rule is {watch}, which admits callers its get "
+                    + $"rule ({get}) refuses. The push carries the whole instance, so it would stream what get "
+                    + "withholds. Give Watch(...) every requirement Get(...) has."
+            );
 
         foreach (
             var (where, policy) in rules

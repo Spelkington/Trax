@@ -9,6 +9,7 @@ using Trax.Api.GraphQL.PersistedOperations.Services;
 using Trax.Api.GraphQL.PersistedOperations.Storage;
 using Trax.Api.GraphQL.TypeModules;
 using Trax.Effect.StateMachine.Persistence;
+using Trax.Mediator.Services.TrainDiscovery;
 
 namespace Trax.Api.GraphQL.PersistedOperations.Startup;
 
@@ -16,11 +17,11 @@ namespace Trax.Api.GraphQL.PersistedOperations.Startup;
 /// Generates every exposed machine's documents from the built schema and registers them in the store before the host
 /// serves anything, so the documents a client was built with are there on the first request and a request that
 /// arrives while the host starts is never answered from a cached miss. While the host runs, it registers them again
-/// every <see cref="PersistedOperationsOptions.MachineDocumentCollectionInterval"/>, which collects an older version's
-/// documents once they have outlived the grace period, and the documents of a machine no registering node has served
-/// for the grace period, without waiting for a node to restart. A node that serves no machine registers an empty set the
-/// same way, so the documents of a deploy that stopped serving every machine are still marked and collected, and their
-/// clients reload instead of retrying forever.
+/// every <see cref="PersistedOperationsOptions.MachineDocumentCollectionInterval"/> (or a quarter of the grace
+/// period, if that is shorter), which keeps its own documents marked as registered and collects any other version's
+/// that no node has registered for the grace period, without waiting for a node to restart. A node that serves no
+/// machine registers an empty set the same way, so the documents of a deploy that stopped serving every machine are
+/// still marked and collected, and their clients reload instead of retrying forever.
 /// </summary>
 /// <remarks>
 /// It registers in <see cref="StartingAsync"/>, which the host finishes for every hosted service before it calls any
@@ -45,7 +46,7 @@ internal sealed class MachineDocumentRegistration(
     private readonly ILogger _logger = logger ?? NullLogger<MachineDocumentRegistration>.Instance;
     private readonly CancellationTokenSource _stopping = new();
     private bool _registered;
-    private IReadOnlyList<MachineDocument> _documents = [];
+    private IReadOnlyList<GeneratedDocument> _documents = [];
     private Task? _collecting;
 
     public async Task StartingAsync(CancellationToken cancellationToken)
@@ -56,7 +57,10 @@ internal sealed class MachineDocumentRegistration(
             services.GetServices<IMachine>(),
             services.GetService<StateMachineOptions>()
         );
-        if (exposed.Count == 0)
+        var trains = services.GetService<ITrainDiscoveryService>() is { } discovery
+            ? TrainTypeModule.AssignTrainNames(discovery.DiscoverTrains())
+            : new Dictionary<TrainRegistration, string>();
+        if (exposed.Count == 0 && trains.Count == 0)
         {
             // No document of this node's, but the registration still runs: it marks the documents of every machine no
             // node serves, and collects them after the grace period, so an earlier deploy's clients reload.
@@ -67,7 +71,7 @@ internal sealed class MachineDocumentRegistration(
             );
             try
             {
-                await RegisterAsync(startup: true, cancellationToken).ConfigureAwait(false);
+                await RegisterAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
@@ -75,7 +79,7 @@ internal sealed class MachineDocumentRegistration(
                     ex,
                     "Could not register this node's empty set of machine documents; the documents of machines no node "
                         + "serves are collected at the next attempt, in {Interval}.",
-                    options.MachineDocumentCollectionInterval
+                    Interval
                 );
             }
             return;
@@ -85,8 +89,13 @@ internal sealed class MachineDocumentRegistration(
             .GetRequiredService<IRequestExecutorProvider>()
             .GetExecutorAsync(TraxSchemaName, cancellationToken)
             .ConfigureAwait(false);
-        _documents = MachineDocuments.Generate(executor.Schema, exposed);
-        await RegisterAsync(startup: true, cancellationToken).ConfigureAwait(false);
+        _documents =
+        [
+            .. (exposed.Count == 0 ? [] : MachineDocuments.Generate(executor.Schema, exposed)),
+            .. TrainDocuments.Generate(executor.Schema, trains),
+            .. ProgressDocuments.Generate(executor.Schema),
+        ];
+        await RegisterAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public Task StartAsync(CancellationToken cancellationToken) =>
@@ -116,22 +125,25 @@ internal sealed class MachineDocumentRegistration(
         _stopping.Dispose();
     }
 
-    // At startup a collected document of this node's is made active again (a node rolled back to it); on a later
-    // registration it is not when a newer version of its machine is stored, so a node still running an older version
-    // after the grace period never brings back what a newer one collected.
-    private async Task RegisterAsync(bool startup, CancellationToken cancellationToken)
+    private async Task RegisterAsync(CancellationToken cancellationToken)
     {
         var readStartedAt = Stopwatch.GetTimestamp();
         var (ownVersions, stored) = await storage
             .RegisterMachineDocumentsAsync(
                 _documents,
                 options.MachineDocumentGracePeriod,
-                cancellationToken,
-                startup
+                cancellationToken
             )
             .ConfigureAwait(false);
         registry.Publish(_documents, ownVersions, stored, readStartedAt);
     }
+
+    // A node writes its documents' updated_at again once it is a quarter of the grace period old, so it registers at
+    // least that often: otherwise another node could take documents it still serves for ones nobody registers.
+    private TimeSpan Interval =>
+        options.MachineDocumentCollectionInterval < options.MachineDocumentGracePeriod / 4
+            ? options.MachineDocumentCollectionInterval
+            : options.MachineDocumentGracePeriod / 4;
 
     private async Task CollectAsync(CancellationToken stoppingToken)
     {
@@ -139,9 +151,8 @@ internal sealed class MachineDocumentRegistration(
         {
             try
             {
-                await Task.Delay(options.MachineDocumentCollectionInterval, stoppingToken)
-                    .ConfigureAwait(false);
-                await RegisterAsync(startup: false, stoppingToken).ConfigureAwait(false);
+                await Task.Delay(Interval, stoppingToken).ConfigureAwait(false);
+                await RegisterAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -151,9 +162,9 @@ internal sealed class MachineDocumentRegistration(
             {
                 _logger.LogWarning(
                     ex,
-                    "Could not register the machine documents again; older versions' documents are collected at the "
+                    "Could not register the generated documents again; other versions' documents are collected at the "
                         + "next attempt, in {Interval}.",
-                    options.MachineDocumentCollectionInterval
+                    Interval
                 );
             }
         }

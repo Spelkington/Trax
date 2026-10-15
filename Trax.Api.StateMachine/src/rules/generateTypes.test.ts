@@ -56,6 +56,16 @@ describe("generateContextTypes", () => {
     );
   });
 
+  it("an effect-bound trigger takes no input in send", () => {
+    const checkoutIr = JSON.parse(fs.readFileSync(irFile("checkout"), "utf8")) as IrDocument;
+    expect(checkoutIr.inputs.Pay?.fields.length).toBeGreaterThan(0);
+
+    const types = generateContextTypes(checkoutIr);
+
+    expect(types).toContain("  Pay: undefined;");
+    expect(types).not.toContain("CheckoutPayInput");
+  });
+
   // A field's own constraints ARE type information: reading them is what keeps a consumer from
   // hand-maintaining a precise copy of a context the IR already describes exactly.
   describe("constraint-derived field types", () => {
@@ -346,5 +356,65 @@ describe("generateMachineFactory import styles", () => {
     expect(
       generateMachineFactory(ir, { importStyle: "specifier" }),
     ).not.toContain('"differential"');
+  });
+});
+
+// The IR is data a host exported: its names are checked before any of them is written as code.
+describe("generated names", () => {
+  const ir = JSON.parse(fs.readFileSync(irFile("turnstile"), "utf8")) as IrDocument;
+
+  it("refuses a state that is not an identifier", () => {
+    const quoted = { ...ir, states: [...ir.states, 'Done"; alert(1); "'] };
+    expect(() => generateContextTypes(quoted)).toThrow(/not an identifier/);
+    expect(() => generateMachineFactory(quoted)).toThrow(/not an identifier/);
+  });
+
+  it("refuses a trigger that is not an identifier", () => {
+    expect(() => generateContextTypes({ ...ir, triggers: ["Coin\nexport"] })).toThrow(/not an identifier/);
+  });
+
+  it("refuses a state or trigger named after an Object.prototype member", () => {
+    for (const name of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      const state = { ...ir, states: [...ir.states, name] };
+      expect(() => generateContextTypes(state)).toThrow(/every JavaScript object has/);
+      expect(() => generateMachineFactory(state)).toThrow(/every JavaScript object has/);
+      expect(() => generateContextTypes({ ...ir, triggers: [...ir.triggers, name] })).toThrow(
+        /every JavaScript object has/,
+      );
+    }
+  });
+
+  it("refuses a context, invariant or input keyed by something that is not a state or trigger", () => {
+    // Parsed, as a manifest is: a "__proto__" key written in an object literal would set the prototype instead.
+    const keyed = (map: string, key: string) =>
+      JSON.parse(JSON.stringify(ir).replace(`"${map}":{`, `"${map}":{${JSON.stringify(key)}:{"fields":[]},`)) as IrDocument;
+    for (const [map, key] of [["context", "__proto__"], ["context", "Nowhere"], ["inputs", "__proto__"], ["inputs", "Locked"]]) {
+      const bad = keyed(map, key);
+      expect(Object.keys(bad[map as "context"])).toContain(key);
+      expect(() => generateContextTypes(bad)).toThrow(/which is not one of its/);
+      expect(() => generateMachineFactory(bad)).toThrow(/which is not one of its/);
+    }
+    const invariants = JSON.parse(JSON.stringify({ ...ir, invariants: {} }).replace('"invariants":{}', '"invariants":{"__proto__":{}}')) as IrDocument;
+    expect(() => generateMachineFactory(invariants)).toThrow(/invariants for "__proto__"/);
+  });
+
+  it("refuses a __proto__ key anywhere in the IR", () => {
+    const bad = JSON.parse(JSON.stringify(ir).replace('"initialContext":{}', '"initialContext":{"__proto__":{"x":1}}')) as IrDocument;
+    expect(Object.hasOwn(bad.initialContext as object, "__proto__")).toBe(true);
+    expect(() => generateMachineFactory(bad)).toThrow(/prototype/);
+  });
+
+  it("refuses an outcome that is not <State>.<kind>", () => {
+    const outcomes = { "Fetching.done;x": { from: "Locked" } } as unknown as IrDocument["outcomes"];
+    expect(() => generateContextTypes({ ...ir, outcomes })).toThrow(/not <State>.<kind>/);
+  });
+
+  it("refuses an id that is not kebab-case", () => {
+    expect(() => generateContextTypes({ ...ir, id: "../escaped" })).toThrow(/kebab-case/);
+    expect(() => generateMachineFactory({ ...ir, id: "turnstile\n// x" })).toThrow(/kebab-case/);
+  });
+
+  it("writes each state of the union as a string literal", () => {
+    expect(generateContextTypes(ir)).toContain('export type TurnstileState = "Locked" | "Unlocked";');
   });
 });
