@@ -162,12 +162,46 @@ public class ClientManifestTests
             .WithMessage("*malformed*irHash*Export it again*");
     }
 
-    [TestCase("""{ "format": 2, "machines": [null] }""")]
+    [Test]
+    public void A_manifest_without_query_models_reads_as_none()
+    {
+        var read = ClientManifest.Read("""{ "format": 3, "trains": [] }""");
+
+        read.QueryModels.Should().BeEmpty();
+        read.FilterInputs.Should().BeEmpty();
+    }
+
+    [Test]
+    public void A_query_model_round_trips()
+    {
+        var manifest = new ClientManifest
+        {
+            QueryModels =
+            [
+                new ClientManifestQueryModel
+                {
+                    Field = "orders",
+                    Namespace = "shop",
+                    Answer = "OrdersConnection",
+                    Arguments = [new ClientManifestArgument { Name = "first", Type = "Int" }],
+                },
+            ],
+            FilterInputs = ["OrderFilterInput"],
+        };
+
+        var read = ClientManifest.Read(ClientManifest.Write(manifest));
+
+        read.QueryModels.Should().BeEquivalentTo(manifest.QueryModels);
+        read.FilterInputs.Should().Equal("OrderFilterInput");
+    }
+
+    [TestCase("""{ "format": 3, "queryModels": [null] }""")]
+    [TestCase("""{ "format": 3, "machines": [null] }""")]
     [TestCase(
-        """{ "format": 2, "trains": [{ "field": "a", "root": "mutation", "documents": [null] }] }"""
+        """{ "format": 3, "trains": [{ "field": "a", "root": "mutation", "arguments": [null] }] }"""
     )]
-    [TestCase("""{ "format": 2, "types": null }""")]
-    [TestCase("""{ "format": 2, "machines": [{ "id": "m", "irHash": "h", "ir": 3 }] }""")]
+    [TestCase("""{ "format": 3, "types": null }""")]
+    [TestCase("""{ "format": 3, "machines": [{ "id": "m", "irHash": "h", "ir": 3 }] }""")]
     public void A_null_or_a_value_of_another_kind_is_refused_with_a_message(string text)
     {
         var read = () => ClientManifest.Read(text);

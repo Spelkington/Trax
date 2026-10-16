@@ -27,15 +27,24 @@ namespace Trax.Effect.StateMachine
     }
     public sealed class ClientManifest : System.IEquatable<Trax.Effect.StateMachine.ClientManifest>
     {
-        public const int CurrentFormat = 2;
+        public const int CurrentFormat = 3;
         public ClientManifest() { }
+        public System.Collections.Generic.IReadOnlyList<string> FilterInputs { get; init; }
         public int Format { get; init; }
         public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestMachine> Machines { get; init; }
         public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestDocument> Progress { get; init; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestQueryModel> QueryModels { get; init; }
         public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestTrain> Trains { get; init; }
         public string Types { get; init; }
         public static Trax.Effect.StateMachine.ClientManifest Read(string text) { }
         public static string Write(Trax.Effect.StateMachine.ClientManifest manifest) { }
+    }
+    public sealed class ClientManifestArgument : System.IEquatable<Trax.Effect.StateMachine.ClientManifestArgument>
+    {
+        public ClientManifestArgument() { }
+        public string? Default { get; init; }
+        public required string Name { get; init; }
+        public required string Type { get; init; }
     }
     public sealed class ClientManifestDocument : System.IEquatable<Trax.Effect.StateMachine.ClientManifestDocument>
     {
@@ -54,6 +63,15 @@ namespace Trax.Effect.StateMachine
         public Trax.Effect.StateMachine.ClientManifestRequirement? Requires { get; init; }
         public string IrText() { }
     }
+    public sealed class ClientManifestQueryModel : System.IEquatable<Trax.Effect.StateMachine.ClientManifestQueryModel>
+    {
+        public ClientManifestQueryModel() { }
+        public string? Answer { get; init; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestArgument> Arguments { get; init; }
+        public required string Field { get; init; }
+        public string? Namespace { get; init; }
+        public Trax.Effect.StateMachine.ClientManifestRequirement? Requires { get; init; }
+    }
     public sealed class ClientManifestRequirement : System.IEquatable<Trax.Effect.StateMachine.ClientManifestRequirement>
     {
         public ClientManifestRequirement() { }
@@ -65,7 +83,7 @@ namespace Trax.Effect.StateMachine
     {
         public ClientManifestTrain() { }
         public string? Answer { get; init; }
-        public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestDocument> Documents { get; init; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestArgument> Arguments { get; init; }
         public required string Field { get; init; }
         public string? Namespace { get; init; }
         public bool Progress { get; init; }

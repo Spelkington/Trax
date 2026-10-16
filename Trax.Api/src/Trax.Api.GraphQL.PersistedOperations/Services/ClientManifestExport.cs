@@ -1,9 +1,13 @@
 using System.Text.Json.Nodes;
 using HotChocolate;
+using HotChocolate.Data.Filters;
+using HotChocolate.Data.Sorting;
 using HotChocolate.Execution;
+using HotChocolate.Language;
 using HotChocolate.Types;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Trax.Api.GraphQL.Configuration;
 using Trax.Api.GraphQL.TypeModules;
 using Trax.Effect.Configuration.ClientExport;
 using Trax.Effect.StateMachine;
@@ -50,7 +54,12 @@ internal static class ClientManifestExport
         var trains = services.GetService<ITrainDiscoveryService>() is { } discovery
             ? TrainTypeModule.AssignTrainNames(discovery.DiscoverTrains())
             : new Dictionary<TrainRegistration, string>();
-        var manifest = Build(executor.Schema, exposed, trains);
+        var manifest = Build(
+            executor.Schema,
+            exposed,
+            trains,
+            services.GetService<GraphQLConfiguration>()?.ModelRegistrations ?? []
+        );
 
         var directory = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path));
         if (directory is not null)
@@ -59,20 +68,42 @@ internal static class ClientManifestExport
             .ConfigureAwait(false);
     }
 
-    /// <summary>The manifest of <paramref name="exposed"/> machines and the trains in <paramref name="trains"/>.</summary>
+    /// <summary>
+    /// The manifest of <paramref name="exposed"/> machines, the trains in <paramref name="trains"/> and the
+    /// <paramref name="queryModels"/> the schema serves.
+    /// </summary>
     public static ClientManifest Build(
         ISchemaDefinition schema,
         IReadOnlyList<IMachine> exposed,
-        IReadOnlyDictionary<TrainRegistration, string> trains
+        IReadOnlyDictionary<TrainRegistration, string> trains,
+        IReadOnlyList<QueryModelRegistration>? queryModels = null
     )
     {
         var documents = exposed.Count == 0 ? [] : MachineDocuments.Generate(schema, exposed);
-        var trainDocuments = TrainDocuments.Generate(schema, trains);
+        var exposedTrains = ExposedTrains.Resolve(schema, trains);
+        var models = (queryModels ?? [])
+            .Select(r =>
+            {
+                var ns = r.Attribute.Namespace is { } n ? TrainTypeModule.CamelCase(n) : null;
+                var field = QueryModelTypeModule.FieldName(r);
+                return
+                    ExposedTrains.FieldOf(schema, mutation: false, ns, field)
+                        is var (holder, definition)
+                    ? (
+                        Registration: r,
+                        Namespace: ns,
+                        Field: field,
+                        Holder: holder,
+                        Definition: definition
+                    )
+                    : default;
+            })
+            .Where(m => m.Definition is not null)
+            .OrderBy(m => m.Namespace ?? "", StringComparer.Ordinal)
+            .ThenBy(m => m.Field, StringComparer.Ordinal)
+            .ToList();
         var progressDocuments = ProgressDocuments.Generate(schema);
-        GeneratedDocumentValidation.Validate(
-            schema,
-            [.. documents, .. trainDocuments, .. progressDocuments]
-        );
+        GeneratedDocumentValidation.Validate(schema, [.. documents, .. progressDocuments]);
         var machines = exposed
             .OrderBy(m => m.Name, StringComparer.Ordinal)
             .Select(machine => new ClientManifestMachine
@@ -93,29 +124,39 @@ internal static class ClientManifestExport
             })
             .ToList();
 
+        var types = DocumentTypes.Sdl(
+            schema,
+            documents.Select(d => d.Text).Concat(progressDocuments.Select(d => d.Text)),
+            exposedTrains
+                .Select(t => $"{t.Holder}.{t.Field}")
+                .Concat(models.Select(m => $"{m.Holder}.{m.Field}"))
+        );
         return new ClientManifest
         {
             Machines = machines,
-            Trains = trainDocuments
-                .Select(d => new ClientManifestTrain
+            Trains = exposedTrains
+                .Select(t => new ClientManifestTrain
                 {
-                    Field = d.Field,
-                    Root = d.Root,
-                    Namespace = d.Namespace,
-                    Answer = d.Answer,
-                    Requires = RequirementOf(d.Registration),
-                    Progress = progressDocuments.Count > 0 && d.Registration.IsRunProgressEnabled,
-                    Documents =
-                    [
-                        new ClientManifestDocument
-                        {
-                            Id = d.Id,
-                            Operation = d.Field,
-                            Document = d.Text,
-                        },
-                    ],
+                    Field = t.Field,
+                    Root = t.Root,
+                    Namespace = t.Namespace,
+                    Answer = Print(t.Definition.Type),
+                    Arguments = t.Definition.Arguments.Select(Argument).ToList(),
+                    Requires = RequirementOf(t.Registration),
+                    Progress = progressDocuments.Count > 0 && t.Registration.IsRunProgressEnabled,
                 })
                 .ToList(),
+            QueryModels = models
+                .Select(m => new ClientManifestQueryModel
+                {
+                    Field = m.Field,
+                    Namespace = m.Namespace,
+                    Answer = Print(m.Definition.Type),
+                    Arguments = m.Definition.Arguments.Select(Argument).ToList(),
+                    Requires = RequirementOf(m.Registration),
+                })
+                .ToList(),
+            FilterInputs = FilterInputs(schema, types),
             Progress = progressDocuments
                 .Select(d => new ClientManifestDocument
                 {
@@ -124,18 +165,64 @@ internal static class ClientManifestExport
                     Document = d.Text,
                 })
                 .ToList(),
-            // The types of the fields a train's document left out are listed too, so a client document may select
-            // them.
-            Types = DocumentTypes.Sdl(
-                schema,
-                documents
-                    .Select(d => d.Text)
-                    .Concat(trainDocuments.Select(d => d.Text))
-                    .Concat(progressDocuments.Select(d => d.Text)),
-                trainDocuments.SelectMany(d => d.LeftOut)
-            ),
+            // Every type a train's or query model's arguments and answer reach, in full, so a client document may
+            // select any of it.
+            Types = types,
         };
     }
+
+    private static ClientManifestArgument Argument(IInputValueDefinition argument) =>
+        new()
+        {
+            Name = argument.Name,
+            Type = Print(argument.Type),
+            Default = argument.DefaultValue?.ToString(),
+        };
+
+    // The listed types that are filter or sort inputs, in name order.
+    private static List<string> FilterInputs(ISchemaDefinition schema, string sdl) =>
+        Utf8GraphQLParser
+            .Parse(string.IsNullOrWhiteSpace(sdl) ? "scalar _None" : sdl)
+            .Definitions.OfType<INamedSyntaxNode>()
+            .Select(d => d.Name.Value)
+            .Where(name =>
+                schema.Types.TryGetType(name, out var type)
+                && type is IFilterInputType or ISortInputType
+            )
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+    private static ClientManifestRequirement RequirementOf(QueryModelRegistration model) =>
+        new()
+        {
+            Anonymous = model.AllowAnonymous,
+            RoleSets = model
+                .AuthorizeAttributes.Where(a => !string.IsNullOrWhiteSpace(a.Roles))
+                .Select(a =>
+                    (IReadOnlyList<string>)
+                        a.Roles!.Split(
+                                ',',
+                                StringSplitOptions.TrimEntries
+                                    | StringSplitOptions.RemoveEmptyEntries
+                            )
+                            .ToList()
+                )
+                .ToList(),
+            Policies = model
+                .AuthorizeAttributes.Select(a => a.Policy)
+                .OfType<string>()
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.Ordinal)
+                .ToList(),
+        };
+
+    private static string Print(IType type) =>
+        type.Kind switch
+        {
+            TypeKind.NonNull => Print(type.InnerType()) + "!",
+            TypeKind.List => "[" + Print(type.InnerType()) + "]",
+            _ => type.NamedType().Name,
+        };
 
     private static ClientManifestRequirement RequirementOf(TrainRegistration train) =>
         new()

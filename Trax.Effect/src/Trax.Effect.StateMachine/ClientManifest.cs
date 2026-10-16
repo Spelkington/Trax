@@ -8,9 +8,9 @@ using System.Text.Json.Serialization;
 namespace Trax.Effect.StateMachine;
 
 /// <summary>
-/// What a host exports for <c>trax client</c>: every persisted document a client may send, by id, each exposed
-/// machine's IR, each exposed train's operations, what each requires of its caller, and the GraphQL types those
-/// documents reach. A host writes it from the documents it registers, so its ids are the ones it serves; the CLI reads
+/// What a host exports for <c>trax client</c>: every persisted document the host generates, by id, each exposed
+/// machine's IR, each exposed train's and query model's field and arguments, what each requires of its caller, and
+/// the GraphQL types those documents, trains and query models reach. A host writes it from the documents it registers, so its ids are the ones it serves; the CLI reads
 /// only this file, so a frontend is generated with no running server and no credential. It never lists an operation
 /// under <c>operations</c>.
 /// </summary>
@@ -20,9 +20,11 @@ public sealed record ClientManifest
     /// <summary>
     /// The format this version writes and reads. A reader refuses any other, so a manifest and the tool that reads it
     /// agree on its shape; it moves when a field is added, removed or changes meaning. Format 2 writes an output
-    /// schema several outcomes share once, under <c>$defs</c>.
+    /// schema several outcomes share once, under <c>$defs</c>. Format 3 lists each train's arguments in place of a
+    /// generated document, since a frontend writes the documents that reach a train, and lists the query models and
+    /// the filter and sort inputs.
     /// </summary>
-    public const int CurrentFormat = 2;
+    public const int CurrentFormat = 3;
 
     /// <summary>The format the file was written in.</summary>
     public int Format { get; init; } = CurrentFormat;
@@ -33,6 +35,16 @@ public sealed record ClientManifest
     /// <summary>The exposed trains, ordered by their field.</summary>
     public IReadOnlyList<ClientManifestTrain> Trains { get; init; } = [];
 
+    /// <summary>The query models, each a field under <c>discover</c>, ordered by namespace and field.</summary>
+    public IReadOnlyList<ClientManifestQueryModel> QueryModels { get; init; } = [];
+
+    /// <summary>
+    /// The names of the types in <see cref="Types"/> that are filter or sort inputs (a query model's <c>where</c> and
+    /// <c>order</c>, and every input they are built from). A client document writes them in its text: a variable of
+    /// one, or of an input holding one, is refused, by the CLI and by the host.
+    /// </summary>
+    public IReadOnlyList<string> FilterInputs { get; init; } = [];
+
     /// <summary>
     /// The documents that follow a run of a train whose <see cref="ClientManifestTrain.Progress"/> is set: the
     /// <c>query</c> that reads it once and the <c>subscription</c> that streams it. Empty when no train sets it.
@@ -40,8 +52,9 @@ public sealed record ClientManifest
     public IReadOnlyList<ClientManifestDocument> Progress { get; init; } = [];
 
     /// <summary>
-    /// The GraphQL type definitions the documents reach, as SDL, so a generator types every input and answer. Only
-    /// those types: the rest of the schema stays on the server.
+    /// The GraphQL type definitions the documents reach, and every type an exposed train's or query model's arguments
+    /// and answer reach, as SDL, so a generator checks and types every document a frontend writes. Only those types: the rest of the
+    /// schema stays on the server.
     /// </summary>
     public string Types { get; init; } = "";
 
@@ -193,13 +206,18 @@ public sealed record ClientManifest
         // A null in a list is not a nullable annotation's to refuse: it is found here.
         if (manifest.Machines.Any(m => m is null || m.Documents.Any(d => d is null)))
             throw Malformed("$.machines", "A machine or one of its documents is null.");
-        if (manifest.Trains.Any(t => t is null || t.Documents.Any(d => d is null)))
-            throw Malformed("$.trains", "A train or one of its documents is null.");
+        if (manifest.Trains.Any(t => t is null || t.Arguments.Any(a => a is null)))
+            throw Malformed("$.trains", "A train or one of its arguments is null.");
+        if (manifest.QueryModels.Any(q => q is null || q.Arguments.Any(a => a is null)))
+            throw Malformed("$.queryModels", "A query model or one of its arguments is null.");
+        if (manifest.FilterInputs.Any(f => f is null))
+            throw Malformed("$.filterInputs", "A filter input's name is null.");
         if (manifest.Progress.Any(d => d is null))
             throw Malformed("$.progress", "A progress document is null.");
         var requirements = manifest
             .Machines.Select(m => m.Requires)
             .Concat(manifest.Trains.Select(t => t.Requires))
+            .Concat(manifest.QueryModels.Select(q => q.Requires))
             .OfType<ClientManifestRequirement>();
         if (
             requirements.Any(r =>
@@ -270,8 +288,8 @@ public sealed record ClientManifestTrain
     /// <summary>What a caller needs to run the train, as its attributes declare it.</summary>
     public ClientManifestRequirement? Requires { get; init; }
 
-    /// <summary>The train's persisted documents, ordered by operation.</summary>
-    public IReadOnlyList<ClientManifestDocument> Documents { get; init; } = [];
+    /// <summary>The arguments the train's field takes, in the order the schema declares them.</summary>
+    public IReadOnlyList<ClientManifestArgument> Arguments { get; init; } = [];
 
     /// <summary>
     /// Whether the caller who starts a run of the train may follow it, through the documents in
@@ -280,13 +298,48 @@ public sealed record ClientManifestTrain
     public bool Progress { get; init; }
 }
 
+/// <summary>One query model in a <see cref="ClientManifest"/>: an entity a host serves as a field under <c>discover</c>.</summary>
+public sealed record ClientManifestQueryModel
+{
+    /// <summary>The query model's field (<c>orders</c>).</summary>
+    public required string Field { get; init; }
+
+    /// <summary>The namespace the field sits under, or null when it is directly under <c>discover</c>.</summary>
+    public string? Namespace { get; init; }
+
+    /// <summary>
+    /// The field's type as SDL writes it: a connection (<c>OrdersConnection</c>) when the model is paged, a list
+    /// otherwise. The types it names are in <see cref="ClientManifest.Types"/>.
+    /// </summary>
+    public string? Answer { get; init; }
+
+    /// <summary>The arguments the field takes (<c>first</c>, <c>after</c>, <c>where</c>, <c>order</c>, ...).</summary>
+    public IReadOnlyList<ClientManifestArgument> Arguments { get; init; } = [];
+
+    /// <summary>What a caller needs to read it, as the entity's attributes declare it.</summary>
+    public ClientManifestRequirement? Requires { get; init; }
+}
+
+/// <summary>One argument of a field in a <see cref="ClientManifest"/>.</summary>
+public sealed record ClientManifestArgument
+{
+    /// <summary>The argument's name (<c>input</c>).</summary>
+    public required string Name { get; init; }
+
+    /// <summary>Its type as SDL writes it (<c>StartRunInput!</c>); the types it names are in <see cref="ClientManifest.Types"/>.</summary>
+    public required string Type { get; init; }
+
+    /// <summary>Its default value as GraphQL writes it, or null when it has none.</summary>
+    public string? Default { get; init; }
+}
+
 /// <summary>One persisted document a client sends by its id.</summary>
 public sealed record ClientManifestDocument
 {
     /// <summary>The id a client sends in place of the document.</summary>
     public required string Id { get; init; }
 
-    /// <summary>The operation: a machine's field (<c>start</c>, an event, <c>get</c>, <c>changed</c>) or a train's.</summary>
+    /// <summary>The operation: a machine's field (<c>start</c>, an event, <c>get</c>, <c>changed</c>) or runProgress's.</summary>
     public required string Operation { get; init; }
 
     /// <summary>The document's text, which the host runs for the id.</summary>

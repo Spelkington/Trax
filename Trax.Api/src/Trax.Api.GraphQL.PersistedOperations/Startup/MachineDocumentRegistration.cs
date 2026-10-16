@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Trax.Api.GraphQL.Configuration;
 using Trax.Api.GraphQL.PersistedOperations.Configuration;
 using Trax.Api.GraphQL.PersistedOperations.Services;
 using Trax.Api.GraphQL.PersistedOperations.Storage;
@@ -92,21 +93,20 @@ internal sealed class MachineDocumentRegistration(
         _documents =
         [
             .. (exposed.Count == 0 ? [] : MachineDocuments.Generate(executor.Schema, exposed)),
-            .. TrainDocuments.Generate(executor.Schema, trains),
             .. ProgressDocuments.Generate(executor.Schema),
         ];
         var clientDocuments = LoadClientDocuments();
-        Services.ClientDocuments.Check(executor.Schema, clientDocuments);
+        // What a client document may reach, decided from what the host registered: the same reach judges the stored
+        // documents other nodes registered (MachineDocumentMiddleware).
+        var reach = ClientDocumentReach.Of(
+            executor.Schema,
+            trains,
+            services.GetService<GraphQLConfiguration>()?.ModelRegistrations ?? []
+        );
+        registry.ClientReach = reach;
+        Services.ClientDocuments.Check(executor.Schema, reach, clientDocuments);
         _documents = [.. _documents, .. clientDocuments];
         GeneratedDocumentValidation.Validate(executor.Schema, _documents);
-        foreach (var train in _documents.OfType<TrainDocument>().Where(d => d.LeftOut.Count > 0))
-            _logger.LogWarning(
-                "The generated document of the {Train} leaves out {LeftOut}: each leads back to a type the answer "
-                    + "already holds, so selecting it would never end. A client that needs one sends a document of "
-                    + "its own.",
-                train.Owner,
-                string.Join(", ", train.LeftOut)
-            );
         await RegisterAsync(cancellationToken).ConfigureAwait(false);
     }
 
