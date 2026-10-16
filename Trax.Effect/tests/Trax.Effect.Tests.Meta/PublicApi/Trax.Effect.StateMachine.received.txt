@@ -27,7 +27,7 @@ namespace Trax.Effect.StateMachine
     }
     public sealed class ClientManifest : System.IEquatable<Trax.Effect.StateMachine.ClientManifest>
     {
-        public const int CurrentFormat = 1;
+        public const int CurrentFormat = 2;
         public ClientManifest() { }
         public int Format { get; init; }
         public System.Collections.Generic.IReadOnlyList<Trax.Effect.StateMachine.ClientManifestMachine> Machines { get; init; }
@@ -545,6 +545,7 @@ namespace Trax.Effect.StateMachine
         public static Trax.Effect.StateMachine.Reduction Keep() { }
         public static Trax.Effect.StateMachine.Reduction Reset() { }
         public static Trax.Effect.StateMachine.SetBuilder Set<TContext, TField>(System.Linq.Expressions.Expression<System.Func<TContext, TField>> field) { }
+        public static Trax.Effect.StateMachine.Reduction SetAll(params Trax.Effect.StateMachine.Reduction[] sets) { }
     }
     public sealed class SetBuilder
     {

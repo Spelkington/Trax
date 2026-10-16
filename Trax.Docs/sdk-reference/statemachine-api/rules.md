@@ -35,6 +35,7 @@ public static class Rules
     public static Reduction Clear();
     public static Reduction Reset();
     public static SetBuilder Set<TContext, TField>(Expression<Func<TContext, TField>> field);
+    public static Reduction SetAll(params Reduction[] sets);
 }
 ```
 
@@ -99,6 +100,7 @@ A reducer computes the destination context. Build one with these factories:
 | `Clear()` | an empty context |
 | `Reset()` | the machine's initial context |
 | `Set<TContext, TField>(Expression<Func<TContext, TField>> field)` | a `SetBuilder`; complete it below |
+| `SetAll(params Reduction[] sets)` | one reduction that applies every `Set` it is given, in order. Throws `ArgumentException` for a reduction that is not a `Set`, or a field set twice |
 
 `Set(...)` clones the context and assigns one field:
 
@@ -107,12 +109,21 @@ A reducer computes the destination context. Build one with these factories:
 | `.FromInput<TInput, TField>(Expression<Func<TInput, TField>> selector)` | a field copied from the trigger input |
 | `.ToValue(JsonNode? value)` | a literal JSON value |
 
+A transition or an outcome edge takes one reduction, so one that fills several fields combines its `Set`s with
+`SetAll`:
+
+```csharp fragment
+.OnDone(Played.Turn, reduce: SetAll(
+    Set((TurnContext c) => c.Slot).FromInput((PlayResult r) => r.Slot),
+    Set((TurnContext c) => c.Target).FromInput((PlayResult r) => r.Target)))
+```
+
 ## Behavior
 
 - A selector (`i => i.Coin`) is an expression tree, resolved to the member's JSON key: its `[JsonPropertyName]` when it has
   one, else its name in camelCase. A rename of the record's member renames the rule with it.
 - Every predicate is total: a missing or wrong-typed field is `false`, never an exception.
-- The vocabulary is fixed. Logic outside it is `Rule.Custom(name)` or `Reduction.Custom(name)` with a handler bound by
+- The vocabulary is fixed. Logic outside it is `new Rule.Custom(name)` or `new Reduction.Custom(name)`, records you construct, with a handler bound by
   `CustomGuard` or `CustomReducer`; see [Delegates and declarative rules](/docs/statemachine/delegates-and-declarative-rules).
 
 ## Examples

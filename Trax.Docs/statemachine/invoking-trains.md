@@ -121,13 +121,25 @@ public sealed class IngestMachine : Machine<Stage, IngestTrigger>
 - `OnDone`, one or more, tried in the order declared: the first whose guard holds for the output is taken, so an
   unguarded `OnDone` after the guarded ones is the fallback. The guard reads the output as the outcome's input, and
   the reduction copies what the next state needs into the context. A train that can be unsure says so in its output,
-  and a guarded `OnDone` routes it, as `NeedsReview` does here.
+  and a guarded `OnDone` routes it, as `NeedsReview` does here. A reduction that fills several fields combines its
+  `Set`s with [`SetAll`](/docs/sdk-reference/statemachine-api/rules).
 - `OnFailed`, exactly once. A run the scheduler reaps arrives here too.
 - `OnCancelled`, exactly once, and required.
 
 `Build` refuses an invoking state that leaves one out, and an outcome that goes to the state the machine starts at or
 to its effect's target. The builder's rules are listed under
 [IInvokeBuilder](/docs/sdk-reference/statemachine-api/machine#iinvokebuilder).
+
+Two more rules shape the rest of the machine, and `Build` refuses a machine that breaks either:
+
+- **An ordinary event may not enter a state an outcome enters.** Only the run's outcome puts an instance in its
+  target. Give each user action its own event into a working state that invokes the train for it, and let the
+  outcome bring the instance back.
+- **An event any caller may send (no rule, `AnyAuthenticated()` or `Anonymous()`) may not copy from its input a field
+  an outcome writes.** A custom reducer (`new Reduction.Custom(name)`) counts as copying every field, so an open event
+  with one is refused whenever the machine invokes a train. Copy each value the next run needs into its own field,
+  with [`SetAll`](/docs/sdk-reference/statemachine-api/rules) when there are several, and leave the fields outcomes
+  write alone.
 
 ## 3. Meet the host's requirements
 
@@ -176,6 +188,11 @@ are authorized.
   creates an instance, and only its runs' outcomes and `IMachineInstances.Advance` move it. Its train is authorized
   inside Trax's trusted execution scope, as a scheduled manifest run is, so the train may not declare
   `[TraxAuthorize]`. Only a system-owned machine chains runs through outcomes.
+
+The run itself has no caller: it executes on the scheduler, where `TraxPrincipal` cannot be injected. A junction that
+acts on the user's data injects [InvokedRun](/docs/sdk-reference/statemachine-api/invoked-run), whose `UserKey` is the
+owner of the instance that queued the run (null for a system-owned one), and checks the data against it. Resolving it
+outside a run a machine invoked throws.
 
 One user holds at most 10 live invoked runs across every machine; a machine sets its own limit with
 `InvokedRunLimit(n)`. Past it, entering the state is refused as `INVOKE_LIMIT_REACHED`. A run counts until it ends,

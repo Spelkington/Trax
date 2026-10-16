@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Trax.Effect.Data.Services.IDataContextFactory;
 using Trax.Effect.Extensions;
+using Trax.Effect.StateMachine.Persistence;
 using Trax.Mediator.Services.TrainDiscovery;
 using Trax.Scheduler.Services.CancellationRegistry;
 using Trax.Scheduler.Services.DeadLetterRequeue;
@@ -38,6 +39,12 @@ public partial class SchedulerConfigurationBuilder
     /// </summary>
     internal void Build()
     {
+        // The scheduler's own trains write a run every poll, the dispatcher above all, and nothing
+        // else removes them. On a database they are cleaned up whether or not the host asked;
+        // AddMetadataCleanup only changes how.
+        if (_parentBuilder.HasDatabaseProvider && _configuration.MetadataCleanup is null)
+            AddMetadataCleanup();
+
         ValidateNoCyclicGroupDependencies();
         ValidateSeedDeclarations();
         ValidateSubmitterRequirements();
@@ -66,6 +73,10 @@ public partial class SchedulerConfigurationBuilder
         _parentBuilder.ServiceCollection.AddSingleton<ISchedulerLivenessMonitor>(sp =>
             sp.GetRequiredService<SchedulerLivenessMonitor>()
         );
+
+        // What a junction of an invoked train injects to learn its instance and owner, set by the
+        // job runner around the run.
+        InvokedRunScope.Register(_parentBuilder.ServiceCollection);
 
         // Register the cancellation registry (singleton — shared across all workers)
         _parentBuilder.ServiceCollection.Replace(
@@ -172,21 +183,21 @@ public partial class SchedulerConfigurationBuilder
         >();
 
         // Register the job submitter and local workers.
-        // Priority: UseInMemoryWorkers/OverrideSubmitter > default (Postgres local workers or InMemory).
+        // Priority: UseInMemoryWorkers/OverrideSubmitter > default (local workers on a database, or InMemory).
         if (_taskServerRegistration is not null)
         {
             _taskServerRegistration.Invoke(_parentBuilder.ServiceCollection);
         }
         else if (_parentBuilder.HasDatabaseProvider)
         {
-            // Default: PostgresJobSubmitter + local worker threads
+            // Default: the database-backed submitter and the local worker pool
             if (
                 _parentBuilder.ServiceCollection.Any(d =>
                     d.ServiceType == typeof(LocalWorkerOptions)
                 )
             )
                 throw new InvalidOperationException(LocalWorkerOptions.RegisteredTwiceMessage);
-            _parentBuilder.ServiceCollection.AddSingleton(_localWorkerOptions);
+            LocalWorkerOptions.Register(_parentBuilder.ServiceCollection, _localWorkerOptions);
             _parentBuilder.ServiceCollection.AddScoped<IJobSubmitter, PostgresJobSubmitter>();
             _parentBuilder.ServiceCollection.AddScopedTraxRoute<IJobRunnerTrain, JobRunnerTrain>();
             _parentBuilder.ServiceCollection.AddHostedService<Services.LocalWorkerService.LocalWorkerService>();
