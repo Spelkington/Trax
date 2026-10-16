@@ -74,10 +74,29 @@ client sends that id and gets `CLIENT_OUTDATED` after the train changes, not a v
 
 - **Hand-written train documents keep working** while they stay uploaded; move clients to the generated ids, then
   deactivate the old ones.
-- **An exposed train whose answer holds itself**, or whose answer has a field with a required argument, now refuses
-  the host's start, naming the train and the type. Flatten the output, or stop exposing the train.
+- **This applies with no machine exposed.** A host with persisted operations on registers a document for each
+  exposed train whether or not it exposes a machine.
+- **An answer that holds itself** no longer refuses the start (it did in 1.64 and 1.65). A field leading back to a
+  type already on the path, such as an EF navigation's reference to its parent, is left out of the document, and the
+  host logs each one at startup. A field with a required argument still refuses the start, naming the train and the
+  field: give the argument a default, or leave the field out of the output.
+- **A generated document past the host's own limits refuses the start**, naming its train or machine, rather than
+  being refused on every call: raise `MaxExecutionDepth` or `MaxOperationsPerRequest`, or give the answer a
+  shallower shape.
 - **The first rolling deploy.** A node from before this release does not reserve `trax_train_`, so while old and new
   nodes overlap a client sending a new train id to an old node gets one validation error. It happens once.
+
+## A generated train answers the type of its document
+
+`trax client` no longer writes an interface per GraphQL object type into `types.g.ts`. Each train's function answers
+`<Train>Result`, the fields its document selects, declared in `trains/<train>.g.ts` and exported from `index.g.ts`;
+`types.g.ts` keeps the enums and inputs. The `runProgress` types (`RunProgress`, `RunProgressEvent`) moved to
+`progress.g.ts` under the same names.
+
+- **An import of an answer's type from the client breaks** (`import { type ProviderCharge } from "./trax/index.g"`).
+  Index the result instead: `type ProviderCharge = PaymentsListChargesResult["charges"][number];`.
+- **Regenerate the client** (`trax client`); the client format is unchanged, so the installed
+  `@traxsharp/state-machine` still serves it.
 
 ## The TypeScript client sends only registered documents
 

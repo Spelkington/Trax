@@ -1,0 +1,20 @@
+{
+  "_comment": "The ids the host and trax client give a client document's text. Both test suites read this file (ClientDocumentsTests and ClientDocumentsGeneratorTests), so the id a generated client sends is the one the host registers.",
+  "cases": [
+    {
+      "name": "OrderCard",
+      "text": "query OrderCard($input: FindOrderInput!) { discover { findOrder(input: $input) { title customer { name } } } }",
+      "id": "trax_client_OrderCard_4a048da14c6c6c6c15700a970304ef724c6ffcb51782292fd0b651fee269527125c9f066b26c0fc7"
+    },
+    {
+      "name": "Note_It",
+      "text": "mutation Note_It($input: RecordNoteInput!) {\n  dispatch {\n    recordNote(input: $input) { output { text } }\n  }\n}\n",
+      "id": "trax_client_Note-It_5f9f68a61be6d07339c2ac75421c88d67d8bddb252bb213bf9ff7ef0e0590905b9508f72c5599a8b"
+    },
+    {
+      "name": "Unicode",
+      "text": "query Unicode { discover { ping(input: { value: \"café ✓\" }) { value } } }",
+      "id": "trax_client_Unicode_2f26704c4c782d72bfd74df772ca1acc4a60c32c8dafe91887d4e171b5a3cfec249af3eef89607f9"
+    }
+  ]
+}

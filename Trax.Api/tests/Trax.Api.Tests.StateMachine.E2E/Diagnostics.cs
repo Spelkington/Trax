@@ -63,3 +63,44 @@ public class RecordNoteJunction : Junction<RecordNoteInput, RecordNoteOutput>
     public override Task<RecordNoteOutput> Run(RecordNoteInput input) =>
         Task.FromResult(new RecordNoteOutput { Text = input.Text });
 }
+
+// A query train answering with an entity graph that refers back to itself, as an EF model with navigations both ways
+// does: the order's customer lists the customer's orders. Its generated document leaves the back-reference out, so a
+// host exposing it starts.
+
+public record FindOrderInput
+{
+    public int Id { get; init; }
+}
+
+public record OrderOutput
+{
+    public string Title { get; init; } = "";
+    public CustomerOutput Customer { get; init; } = new();
+}
+
+public record CustomerOutput
+{
+    public string Name { get; init; } = "";
+    public OrderOutput[] Orders { get; init; } = [];
+}
+
+public interface IFindOrder : IServiceTrain<FindOrderInput, OrderOutput> { }
+
+[TraxAllowAnonymous]
+[TraxQuery(Description = "An order and its customer, whose orders lead back to the order.")]
+public class FindOrder : ServiceTrain<FindOrderInput, OrderOutput>, IFindOrder
+{
+    protected override Task<Either<Exception, OrderOutput>> Junctions() =>
+        Chain<FindOrderJunction>().Resolve();
+}
+
+public class FindOrderJunction : Junction<FindOrderInput, OrderOutput>
+{
+    public override Task<OrderOutput> Run(FindOrderInput input)
+    {
+        var order = new OrderOutput { Title = $"Order {input.Id}" };
+        var customer = new CustomerOutput { Name = "Ada", Orders = [order] };
+        return Task.FromResult(order with { Customer = customer });
+    }
+}

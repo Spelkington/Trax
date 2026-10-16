@@ -69,6 +69,10 @@ internal static class ClientManifestExport
         var documents = exposed.Count == 0 ? [] : MachineDocuments.Generate(schema, exposed);
         var trainDocuments = TrainDocuments.Generate(schema, trains);
         var progressDocuments = ProgressDocuments.Generate(schema);
+        GeneratedDocumentValidation.Validate(
+            schema,
+            [.. documents, .. trainDocuments, .. progressDocuments]
+        );
         var machines = exposed
             .OrderBy(m => m.Name, StringComparer.Ordinal)
             .Select(machine => new ClientManifestMachine
@@ -120,12 +124,15 @@ internal static class ClientManifestExport
                     Document = d.Text,
                 })
                 .ToList(),
+            // The types of the fields a train's document left out are listed too, so a client document may select
+            // them.
             Types = DocumentTypes.Sdl(
                 schema,
                 documents
                     .Select(d => d.Text)
                     .Concat(trainDocuments.Select(d => d.Text))
-                    .Concat(progressDocuments.Select(d => d.Text))
+                    .Concat(progressDocuments.Select(d => d.Text)),
+                trainDocuments.SelectMany(d => d.LeftOut)
             ),
         };
     }

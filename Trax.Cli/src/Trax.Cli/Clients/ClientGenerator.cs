@@ -12,10 +12,14 @@ namespace Trax.Cli.Clients;
 /// <param name="Manifest">The host's client manifest.</param>
 /// <param name="Specifier">The module the generated code imports the runtime from.</param>
 /// <param name="ToolsDir">The engine's <c>tools/</c>, when the bundled twin generator is not used.</param>
+/// <param name="Documents">The <c>.graphql</c> files the frontend wrote, when <c>--documents</c> names any.</param>
+/// <param name="DocumentGlobs">The globs that found them, relative to the output directory, for the editor's config.</param>
 internal sealed record ClientGenerateOptions(
     ClientManifest Manifest,
     string Specifier = ClientGenerator.DefaultSpecifier,
-    string? ToolsDir = null
+    string? ToolsDir = null,
+    IReadOnlyList<ClientDocumentFile>? Documents = null,
+    IReadOnlyList<string>? DocumentGlobs = null
 );
 
 /// <summary>One file of a generated client: its path under the output directory, and its text.</summary>
@@ -32,7 +36,7 @@ internal sealed record ClientDrift(string Path, DriftStatus Status);
 /// engine's own generator, under node. Nothing generated carries a credential: the host's address and the caller's
 /// headers are given at run time, to <c>configureTrax</c>.
 /// </summary>
-internal sealed class ClientGenerator
+internal sealed partial class ClientGenerator
 {
     /// <summary>
     /// The client format this generator writes, held equal to the runtime's <c>clientFormat</c>
@@ -99,7 +103,7 @@ internal sealed class ClientGenerator
             names.Claim($"{camel}Server", machine.Id);
             machines.Add((machine, camel, pascal));
         }
-        var trains = new List<(string Function, string Text)>();
+        var trains = new List<(string Function, string Result, string Text)>();
         // A train's file is claimed by its path in lower case, so two that differ only in case are refused before a
         // case-insensitive disk writes one over the other.
         var paths = new Names(StringComparer.OrdinalIgnoreCase);
@@ -118,17 +122,50 @@ internal sealed class ClientGenerator
                 "train field"
             );
             names.Claim(function, owner);
+            var result = names.Claim($"{TypeScript.Upper(function)}Result", owner);
             paths.Claim($"trains/{function}.g.ts", owner);
-            trains.Add((function, Train(train, function, types)));
+            trains.Add((function, result, Train(train, function, result, types)));
         }
         // types.g.ts is exported from the index beside everything else, so its names are claimed with them.
         if (trains.Count > 0)
             foreach (var type in types.Declared)
                 names.Claim(type, $"the GraphQL type {type}");
 
+        var clientDocuments = options.Documents is { } documentFiles
+            ? ClientDocumentSet.Read(documentFiles, manifest, types)
+            : null;
+        var documentModules = new List<(string Function, string Result, string Text)>();
+        if (clientDocuments is not null)
+        {
+            foreach (
+                var (name, _) in clientDocuments.Fragments.OrderBy(
+                    f => f.Key,
+                    StringComparer.Ordinal
+                )
+            )
+                names.Claim(TypeScript.Identifier(name, "fragment"), $"the fragment {name}");
+            foreach (var operation in clientDocuments.Operations)
+            {
+                var owner = $"the client document {operation.Name} ({operation.Source})";
+                var function = names.Claim(
+                    TypeScript.Identifier(Lower(operation.Name), "operation"),
+                    owner
+                );
+                var result = names.Claim($"{TypeScript.Upper(function)}Result", owner);
+                paths.Claim($"documents/{function}.g.ts", owner);
+                documentModules.Add(
+                    (
+                        function,
+                        result,
+                        DocumentModule(operation, function, result, types, clientDocuments)
+                    )
+                );
+            }
+        }
+
         var progress = Progress(manifest);
         if (progress is not null)
-            foreach (var name in ProgressNames.Append("RunProgressView"))
+            foreach (var name in ProgressNames.Concat(ProgressTypeNames))
                 names.Claim(name, "runProgress");
 
         var typesText = trains.Count > 0 ? types.Render() : null;
@@ -156,19 +193,56 @@ internal sealed class ClientGenerator
             files.Add(new("types.g.ts", typesText));
             index.Append("export type * from \"./types.g\";\n");
         }
-        foreach (var (function, text) in trains)
+        foreach (var (function, result, text) in trains)
         {
             files.Add(new($"trains/{function}.g.ts", text));
-            index.Append($"export {{ {function} }} from \"./trains/{function}.g\";\n");
+            index.Append(
+                $"export {{ {function}, type {result} }} from \"./trains/{function}.g\";\n"
+            );
+        }
+
+        foreach (var (function, result, text) in documentModules)
+        {
+            files.Add(new($"documents/{function}.g.ts", text));
+            index.Append(
+                $"export {{ {function}, type {result} }} from \"./documents/{function}.g\";\n"
+            );
+        }
+        if (clientDocuments is not null)
+        {
+            if (clientDocuments.Fragments.Count > 0)
+            {
+                files.Add(new("fragments.g.ts", FragmentsModule(clientDocuments, types)));
+                index.Append(
+                    $"export type {{ {string.Join(", ", clientDocuments.Fragments.Keys.Order(StringComparer.Ordinal))} }} from \"./fragments.g\";\n"
+                );
+            }
+            files.Add(new(DocumentsFileName, DocumentsJson(clientDocuments)));
+            files.Add(new(EditorSchemaFileName, EditorSchema(manifest)));
+            files.Add(
+                new(
+                    "graphql.config.yml",
+                    EditorConfig(
+                        options.DocumentGlobs
+                            ?? options
+                                .Documents!.Select(d => d.Source)
+                                .Order(StringComparer.Ordinal)
+                                .ToList()
+                    )
+                )
+            );
         }
 
         if (progress is { } documents)
         {
             files.Add(
-                new("progress.g.ts", ProgressModule(documents.Query, documents.Stream, manifest))
+                new(
+                    "progress.g.ts",
+                    ProgressModule(documents.Query, documents.Stream, manifest, types)
+                )
             );
             index.Append(
-                $"export {{ {string.Join(", ", ProgressNames)}, type RunProgressView }} from \"./progress.g\";\n"
+                $"export {{ {string.Join(", ", ProgressNames)}, {string.Join(", ", ProgressTypeNames.Select(n => "type " + n))} }} from \"./progress.g\";\n"
             );
         }
 
@@ -888,29 +962,15 @@ internal sealed class ClientGenerator
         return sb.ToString();
     }
 
-    private static string Train(ClientManifestTrain train, string function, SdlTypes types)
+    private static string Train(
+        ClientManifestTrain train,
+        string function,
+        string result,
+        SdlTypes types
+    )
     {
         var document = train.Documents[0];
-        GraphQLDocument parsed;
-        try
-        {
-            parsed = Parser.Parse(document.Document);
-        }
-        catch (GraphQLParser.Exceptions.GraphQLParserException ex)
-        {
-            throw new InvalidOperationException(
-                $"The document of the train '{train.Field}' is not GraphQL ({ex.Message.Trim()}). Export the "
-                    + "manifest again from the host.",
-                ex
-            );
-        }
-        var operation = parsed.Definitions.OfType<GraphQLOperationDefinition>().ToList()
-            is [var single]
-            ? single
-            : throw new InvalidOperationException(
-                $"The document of the train '{train.Field}' does not hold one operation. Export the manifest "
-                    + "again from the host."
-            );
+        var operation = Operation(document, $"the train '{train.Field}'");
         var root = train.Root == "mutation" ? "dispatch" : "discover";
         var answer =
             SdlTypes.ParseType(train.Answer, $"the train '{train.Field}'")
@@ -920,6 +980,70 @@ internal sealed class ClientGenerator
             );
 
         var variables = operation.Variables?.Items ?? [];
+        var (parameters, values) = Signature(
+            variables,
+            types,
+            function,
+            $"The train '{train.Field}'",
+            "Rename it on the host."
+        );
+        var path = new List<string> { root };
+        if (train.Namespace is not null)
+            path.Add(train.Namespace);
+        path.Add(train.Field);
+
+        var owner = $"the train '{train.Field}'";
+        var answerTypes = new HashSet<string>(StringComparer.Ordinal);
+        var resultType = new SelectionTypes(types).Of(
+            answer,
+            SelectionTypes.SelectionAt(operation, path, owner),
+            owner,
+            answerTypes
+        );
+
+        var sb = new StringBuilder(Header);
+        sb.Append("import \"../format.g\";\n");
+        sb.Append("import { sendDocument } from \"../client.g\";\n");
+        var used = types
+            .NamesIn(variables.Select(v => v.Type))
+            .Concat(answerTypes)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        if (used.Count > 0)
+            sb.Append($"import type {{ {string.Join(", ", used)} }} from \"../types.g\";\n");
+        sb.Append('\n');
+        sb.Append(
+            $"/** The persisted id of '{EscapeDocText(train.Field)}', which the host registered. */\n"
+        );
+        sb.Append($"export const {function}DocumentId = {TypeScript.Literal(document.Id)};\n\n");
+        sb.Append(
+            $"/** What '{EscapeDocText(train.Field)}' answers: the fields its document selects. */\n"
+        );
+        sb.Append($"export type {result} = {resultType};\n\n");
+        sb.Append(TypeScript.Doc(Requirement(train.Requires)));
+        sb.Append(
+            $"export function {function}({string.Join(", ", parameters)}): Promise<{result}> {{\n"
+        );
+        sb.Append(
+            $"  return sendDocument({function}DocumentId, {(values.Count == 0 ? "{}" : $"{{ {string.Join(", ", values)} }}")}, [{string.Join(", ", path.Select(TypeScript.Literal))}]);\n"
+        );
+        sb.Append("}\n");
+        return sb.ToString();
+    }
+
+    private const string RunProgressField = "runProgress";
+
+    // A function's parameters for an operation's variables: each required one by name, the rest in `options`; and
+    // the values it sends. A variable named like a local the function's body uses is refused.
+    private static (List<string> Parameters, List<string> Values) Signature(
+        IReadOnlyList<GraphQLVariableDefinition> variables,
+        SdlTypes types,
+        string function,
+        string owner,
+        string fix
+    )
+    {
         var required = variables
             .Where(v => v.Type is GraphQLNonNullType && v.DefaultValue is null)
             .ToList();
@@ -933,8 +1057,7 @@ internal sealed class ClientGenerator
             var name = TypeScript.Identifier(variable.Variable.Name.StringValue, "variable");
             if (locals.Contains(name, StringComparer.Ordinal))
                 throw new InvalidOperationException(
-                    $"The train '{train.Field}' has a variable '{name}', a name its generated function uses. "
-                        + "Rename it on the host."
+                    $"{owner} has a variable '{name}', a name its generated function uses. {fix}"
                 );
             parameters.Add($"{name}: {types.InputType(variable.Type)}");
         }
@@ -953,38 +1076,42 @@ internal sealed class ClientGenerator
             .Select(v => v.Variable.Name.StringValue)
             .Concat(optional.Count > 0 ? ["...options"] : [])
             .ToList();
-        var path = new List<string> { root };
-        if (train.Namespace is not null)
-            path.Add(train.Namespace);
-        path.Add(train.Field);
-
-        var sb = new StringBuilder(Header);
-        sb.Append("import \"../format.g\";\n");
-        sb.Append("import { sendDocument } from \"../client.g\";\n");
-        var used = types
-            .NamesIn(variables.Select(v => v.Type))
-            .Append(types.NameOf(answer))
-            .Where(n => n is not null)
-            .Distinct(StringComparer.Ordinal)
-            .Order(StringComparer.Ordinal)
-            .ToList();
-        if (used.Count > 0)
-            sb.Append($"import type {{ {string.Join(", ", used)} }} from \"../types.g\";\n");
-        sb.Append('\n');
-        sb.Append(
-            $"/** The persisted id of '{EscapeDocText(train.Field)}', which the host registered. */\n"
-        );
-        sb.Append($"export const {function}DocumentId = {TypeScript.Literal(document.Id)};\n\n");
-        sb.Append(TypeScript.Doc(Requirement(train.Requires)));
-        sb.Append(
-            $"export function {function}({string.Join(", ", parameters)}): Promise<{types.OutputType(answer)}> {{\n"
-        );
-        sb.Append(
-            $"  return sendDocument({function}DocumentId, {(values.Count == 0 ? "{}" : $"{{ {string.Join(", ", values)} }}")}, [{string.Join(", ", path.Select(TypeScript.Literal))}]);\n"
-        );
-        sb.Append("}\n");
-        return sb.ToString();
+        return (parameters, values);
     }
+
+    // The one operation a manifest document holds, parsed; anything else is refused naming what it belongs to.
+    private static GraphQLOperationDefinition Operation(
+        ClientManifestDocument document,
+        string owner
+    )
+    {
+        GraphQLDocument parsed;
+        try
+        {
+            parsed = Parser.Parse(document.Document);
+        }
+        catch (GraphQLParser.Exceptions.GraphQLParserException ex)
+        {
+            throw new InvalidOperationException(
+                $"The document of {owner} is not GraphQL ({ex.Message.Trim()}). Export the manifest again from "
+                    + "the host.",
+                ex
+            );
+        }
+        return parsed.Definitions.OfType<GraphQLOperationDefinition>().ToList() is [var single]
+            ? single
+            : throw new InvalidOperationException(
+                $"The document of {owner} does not hold one operation. Export the manifest again from the host."
+            );
+    }
+
+    // The types the progress module declares: the answers of its two documents, and the view its hook keeps.
+    private static readonly string[] ProgressTypeNames =
+    [
+        "RunProgress",
+        "RunProgressEvent",
+        "RunProgressView",
+    ];
 
     private static readonly string[] ProgressNames =
     [
@@ -1015,9 +1142,32 @@ internal sealed class ClientGenerator
     private static string ProgressModule(
         ClientManifestDocument query,
         ClientManifestDocument stream,
-        ClientManifest manifest
+        ClientManifest manifest,
+        SdlTypes types
     )
     {
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        var selections = new SelectionTypes(types);
+        var progress = selections.Of(
+            SdlTypes.ParseType("RunProgress!", "runProgress")!,
+            SelectionTypes.SelectionAt(
+                Operation(query, "the runProgress query"),
+                [RunProgressField],
+                "the runProgress query"
+            ),
+            "the runProgress query",
+            used
+        );
+        var progressEvent = selections.Of(
+            SdlTypes.ParseType("RunProgressEvent!", "runProgress")!,
+            SelectionTypes.SelectionAt(
+                Operation(stream, "the runProgress subscription"),
+                [RunProgressField],
+                "the runProgress subscription"
+            ),
+            "the runProgress subscription",
+            used
+        );
         var followable = manifest
             .Trains.Where(t => t.Progress)
             .Select(t => t.Namespace is null ? t.Field : $"{t.Namespace}.{t.Field}")
@@ -1029,7 +1179,19 @@ internal sealed class ClientGenerator
         sb.Append(
             "import { sendDocument, subscribeTrax, traxConnection, traxGeneration, traxSocket, TraxOperationError } from \"./client.g\";\n"
         );
-        sb.Append("import type { RunProgress, RunProgressEvent } from \"./types.g\";\n\n");
+        if (used.Count > 0)
+            sb.Append(
+                $"import type {{ {string.Join(", ", used.Order(StringComparer.Ordinal))} }} from \"./types.g\";\n"
+            );
+        sb.Append('\n');
+        sb.Append(
+            "/** A run as the runProgress query answers it: the fields its document selects. */\n"
+        );
+        sb.Append($"export type RunProgress = {progress};\n\n");
+        sb.Append(
+            "/** A change to a run as the runProgress subscription sends it: the fields its document selects. */\n"
+        );
+        sb.Append($"export type RunProgressEvent = {progressEvent};\n\n");
         sb.Append("/** The persisted id of the runProgress query, which the host registered. */\n");
         sb.Append($"export const runProgressDocumentId = {TypeScript.Literal(query.Id)};\n\n");
         sb.Append(
