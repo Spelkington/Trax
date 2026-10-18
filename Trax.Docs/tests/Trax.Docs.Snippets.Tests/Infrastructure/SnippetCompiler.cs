@@ -7,15 +7,87 @@ namespace Trax.Docs.Snippets.Tests.Infrastructure;
 /// <summary>
 /// The fences of one page that compile together: one fence marked <c>compile</c>, or every fence
 /// on the page that names the same <c>compile=group</c>.
+///
+/// <para>
+/// A page whose front matter says <c>follows: book/an-order-is-a-train</c> carries on a project the
+/// page it names started, as a chapter of the book carries on the last one. Each of its groups
+/// compiles with the followed page's group of the same name, and that page's own followed page,
+/// back to the first. A fence that names a file (<c>file=Program.cs</c>) replaces the fence before
+/// it that names the same file, so a chapter shows only the files it adds or changes and still
+/// compiles as the whole project.
+/// </para>
+/// <para>
+/// A group named <c>tests</c> is the project's test project. It compiles as an assembly of its own,
+/// with the implicit usings of a plain <c>Microsoft.NET.Sdk</c> project and the test frameworks a
+/// test project has (<see cref="SnippetCompiler.TestFrameworkAssemblyPrefixes"/>), against the
+/// page's <c>app</c> group compiled as the project it references, whose internals it sees
+/// (<see cref="App"/>).
+/// </para>
 /// </summary>
 public sealed record SnippetUnit(string Page, string Group, IReadOnlyList<Fence> Fences)
 {
+    /// <summary>
+    /// For a <see cref="TestsGroup"/> unit, the fences of the project it tests, which it references;
+    /// empty otherwise.
+    /// </summary>
+    public IReadOnlyList<Fence> App { get; init; } = [];
+
+    /// <summary>The group a page's test project is in.</summary>
+    public const string TestsGroup = "tests";
+
+    /// <summary>The group a <see cref="TestsGroup"/> compiles against.</summary>
+    public const string AppGroup = "app";
+
     public override string ToString() => $"{Page} [{Group}]";
+
+    /// <summary>Whether this unit is a test project, compiled with the test frameworks.</summary>
+    public bool IsTests => Group == TestsGroup;
 
     /// <summary>The compiled fences of every page, one unit per page and group.</summary>
     public static IEnumerable<SnippetUnit> InDocs() =>
-        Infrastructure
-            .Fences.InDocs()
+        WithTheAppInTheTests(
+            Following(
+                    Own(Infrastructure.Fences.InDocs()).ToList(),
+                    SnippetCompiler.FollowedPageOf,
+                    SnippetCompiler.MovesOf
+                )
+                .ToList(),
+            SnippetCompiler.FollowedPageOf
+        );
+
+    /// <summary>
+    /// Each <see cref="TestsGroup"/> unit with the <see cref="AppGroup"/> fences of its page, or of
+    /// the nearest page before it in its chain that has them, as the project it tests; every other
+    /// unit as it is.
+    /// </summary>
+    public static IEnumerable<SnippetUnit> WithTheAppInTheTests(
+        IReadOnlyList<SnippetUnit> units,
+        Func<string, string?>? followedPageOf = null
+    )
+    {
+        var apps = units.Where(u => u.Group == AppGroup).ToDictionary(u => u.Page);
+        return units.Select(u =>
+        {
+            // A test project, or on a page in a chain, any project but the app: each is an assembly
+            // of its own that references the app, as a book's worker references its library.
+            var chained =
+                followedPageOf is not null
+                && (
+                    followedPageOf(u.Page) is not null
+                    || units.Any(o => followedPageOf(o.Page) == u.Page)
+                );
+            if (u.Group == AppGroup || !(u.IsTests || chained))
+                return u;
+            var page = (string?)u.Page;
+            while (page is not null && !apps.ContainsKey(page))
+                page = followedPageOf?.Invoke(page);
+            return page is null ? u : u with { App = apps[page].Fences };
+        });
+    }
+
+    /// <summary>The units the fences make on their own pages, before any page follows another.</summary>
+    public static IEnumerable<SnippetUnit> Own(IEnumerable<Fence> fences) =>
+        fences
             .Where(f => f.IsCompiled && f.IsCSharp)
             .SelectMany(f => f.Groups.Select(g => (Fence: f, Group: g)))
             .GroupBy(x => (x.Fence.Page, x.Group))
@@ -26,6 +98,77 @@ public sealed record SnippetUnit(string Page, string Group, IReadOnlyList<Fence>
                 g.Key.Group,
                 g.Select(x => x.Fence).OrderBy(f => f.OpenLine).ToList()
             ));
+
+    /// <summary>
+    /// Each unit with the fences of the pages it follows, oldest first, a fence naming a file
+    /// replacing an earlier one that names the same file.
+    /// </summary>
+    /// <param name="units">Every page's own units.</param>
+    /// <param name="followedPageOf">The page a page follows, or null.</param>
+    public static IEnumerable<SnippetUnit> Following(
+        IReadOnlyList<SnippetUnit> units,
+        Func<string, string?> followedPageOf,
+        Func<string, IReadOnlyList<(string From, string To)>>? movesOf = null
+    )
+    {
+        var byPage = units.ToDictionary(u => (u.Page, u.Group));
+
+        foreach (var unit in units)
+        {
+            var chain = ChainOf(unit.Page, followedPageOf);
+            if (chain.Count == 0)
+            {
+                yield return unit;
+                continue;
+            }
+
+            var fences = new List<Fence>();
+            foreach (var page in chain.Append(unit.Page))
+            {
+                // A page that moves files moves the ones the pages before it showed, before its own
+                // fences replace any of them.
+                foreach (var (from, to) in movesOf?.Invoke(page) ?? [])
+                    for (var i = 0; i < fences.Count; i++)
+                        if (
+                            fences[i].File is { } file
+                            && file.StartsWith(from, StringComparison.Ordinal)
+                        )
+                            fences[i] = fences[i] with { File = to + file[from.Length..] };
+                if (!byPage.TryGetValue((page, unit.Group), out var earlier))
+                    continue;
+                foreach (var fence in earlier.Fences)
+                {
+                    if (fence.File is not null)
+                        fences.RemoveAll(f => f.File == fence.File);
+                    fences.Add(fence);
+                }
+            }
+
+            yield return unit with
+            {
+                Fences = fences,
+            };
+        }
+    }
+
+    /// <summary>
+    /// The pages <paramref name="page"/> follows, the first page of the chain first. Throws on a
+    /// chain that comes back to a page it has passed.
+    /// </summary>
+    public static IReadOnlyList<string> ChainOf(string page, Func<string, string?> followedPageOf)
+    {
+        var chain = new List<string>();
+        for (var at = followedPageOf(page); at is not null; at = followedPageOf(at))
+        {
+            if (at == page || chain.Contains(at))
+                throw new InvalidOperationException(
+                    $"{page} follows a chain of pages that comes back to {at}."
+                );
+            chain.Add(at);
+        }
+        chain.Reverse();
+        return chain;
+    }
 }
 
 /// <summary>
@@ -88,11 +231,25 @@ public static class SnippetCompiler
         "nunit.",
         "NUnit3.",
         "AwesomeAssertions",
+        "Microsoft.AspNetCore.Mvc.Testing",
+        "Microsoft.AspNetCore.TestHost",
         "Microsoft.CodeAnalysis",
         "Microsoft.TestPlatform",
         "Microsoft.VisualStudio.TestPlatform",
         "Microsoft.VisualStudio.CodeCoverage",
         "testhost",
+    ];
+
+    /// <summary>
+    /// The test frameworks a reader's test project references, which a <c>tests</c> group compiles
+    /// with and every other group does not.
+    /// </summary>
+    public static readonly IReadOnlyList<string> TestFrameworkAssemblyPrefixes =
+    [
+        "nunit.",
+        "AwesomeAssertions",
+        "Microsoft.AspNetCore.Mvc.Testing",
+        "Microsoft.AspNetCore.TestHost",
     ];
 
     /// <summary>
@@ -110,7 +267,13 @@ public static class SnippetCompiler
 
     private static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.Latest);
 
-    private static readonly Lazy<IReadOnlyList<MetadataReference>> References = new(LoadReferences);
+    private static readonly Lazy<IReadOnlyList<MetadataReference>> References = new(() =>
+        LoadReferences(tests: false)
+    );
+
+    private static readonly Lazy<IReadOnlyList<MetadataReference>> TestReferences = new(() =>
+        LoadReferences(tests: true)
+    );
 
     /// <summary>The context file every page's compilations get, unless the page opts out.</summary>
     public const string SharedFile = "_shared.cs";
@@ -169,22 +332,153 @@ public static class SnippetCompiler
     public static bool OptsOutOfSharedContextIn(string markdown) =>
         NoSnippetContext.IsMatch(markdown);
 
+    private static readonly Regex FrontMatter = new(
+        @"\A---\n(?<body>(?:(?!---\n).*\n)*?)---(?:\n|\z)",
+        RegexOptions.Compiled
+    );
+
+    private static readonly Regex Move = new(
+        @"^[ \t]+-[ \t]+""?(?<from>[^""\s]+)[ \t]+->[ \t]+(?<to>[^""\s]+?)""?[ \t]*$",
+        RegexOptions.Compiled
+    );
+
+    /// <summary>
+    /// The moves the page's front matter lists under <c>moves:</c>, each a path prefix of the files
+    /// the pages before it showed and the prefix they move to (<c>- Trains/ -> Shopfront.Core/Trains/</c>).
+    /// </summary>
+    public static IReadOnlyList<(string From, string To)> MovesOf(string page)
+    {
+        var file = RepoRoot.Combine(page.Split('/'));
+        return File.Exists(file) ? MovesIn(File.ReadAllText(file).Replace("\r\n", "\n")) : [];
+    }
+
+    /// <summary>The moves listed under <c>moves:</c> in the front matter of <paramref name="markdown"/>.</summary>
+    public static IReadOnlyList<(string From, string To)> MovesIn(string markdown)
+    {
+        var body = FrontMatter.Match(markdown);
+        if (!body.Success)
+            return [];
+        var moves = new List<(string, string)>();
+        var inMoves = false;
+        foreach (var line in body.Groups["body"].Value.Split('\n'))
+        {
+            if (!line.StartsWith(' ') && !line.StartsWith('\t'))
+            {
+                inMoves = line.TrimEnd() == "moves:";
+                continue;
+            }
+            if (inMoves && Move.Match(line) is { Success: true } move)
+                moves.Add((move.Groups["from"].Value, move.Groups["to"].Value));
+        }
+        return moves;
+    }
+
+    private static readonly Regex Follows = new(
+        @"\A---\n(?:(?!---\n).*\n)*?follows:[ \t]*(?<page>\S+)[ \t]*\n(?:.*\n)*?---(?:\n|\z)",
+        RegexOptions.Compiled
+    );
+
+    /// <summary>
+    /// The page <paramref name="page"/> follows, from <c>follows:</c> in its front matter, as a
+    /// path relative to the docs root (<c>book/an-order-is-a-train.md</c>). Null when it follows
+    /// none or does not exist.
+    /// </summary>
+    public static string? FollowedPageOf(string page)
+    {
+        var file = RepoRoot.Combine(page.Split('/'));
+        return File.Exists(file)
+            ? FollowedPageIn(File.ReadAllText(file).Replace("\r\n", "\n"))
+            : null;
+    }
+
+    /// <summary>The page the front matter's <c>follows:</c> names, with <c>.md</c>, or null.</summary>
+    public static string? FollowedPageIn(string markdown)
+    {
+        var match = Follows.Match(markdown);
+        return match.Success ? match.Groups["page"].Value.Trim('"', '\'', '/') + ".md" : null;
+    }
+
     /// <summary>
     /// The unit's errors and warnings, each as <c>page.md:line:column: severity id: message</c>.
     /// Empty when it compiles cleanly.
     /// </summary>
     public static IReadOnlyList<string> Diagnose(SnippetUnit unit)
     {
+        if (unit.App.Count > 0)
+        {
+            // The project it references: its own diagnostics belong to the app unit, which reports
+            // them. It grants the tests its internals, as InternalsVisibleTo does.
+            var app = Compile(
+                AppAssemblyName,
+                unit.Page,
+                unit.App,
+                ImplicitUsings,
+                References.Value,
+                $"[assembly: System.Runtime.CompilerServices.InternalsVisibleTo(\"{TestsAssemblyName}\")]"
+            );
+            return Report(
+                Compile(
+                    unit.IsTests ? TestsAssemblyName : $"{AppAssemblyName}.{unit.Group}",
+                    unit.Page,
+                    unit.Fences,
+                    unit.IsTests ? TestImplicitUsings : ImplicitUsings,
+                    [
+                        .. unit.IsTests ? TestReferences.Value : References.Value,
+                        app.ToMetadataReference(),
+                    ],
+                    withContext: false
+                )
+            );
+        }
+
+        return Report(
+            Compile(
+                AppAssemblyName,
+                unit.Page,
+                unit.Fences,
+                ImplicitUsings,
+                unit.IsTests ? TestReferences.Value : References.Value
+            )
+        );
+    }
+
+    private const string AppAssemblyName = "Snippet";
+
+    private const string TestsAssemblyName = "Snippet.Tests";
+
+    /// <summary>The usings a plain <c>Microsoft.NET.Sdk</c> project, as a test project is, gets.</summary>
+    public static readonly IReadOnlyList<string> TestImplicitUsings =
+    [
+        "System",
+        "System.Collections.Generic",
+        "System.IO",
+        "System.Linq",
+        "System.Net.Http",
+        "System.Threading",
+        "System.Threading.Tasks",
+    ];
+
+    private static CSharpCompilation Compile(
+        string assemblyName,
+        string page,
+        IEnumerable<Fence> fences,
+        IReadOnlyList<string> implicitUsings,
+        IEnumerable<MetadataReference> references,
+        string? extraSource = null,
+        bool withContext = true
+    )
+    {
         var trees = new List<SyntaxTree>
         {
             CSharpSyntaxTree.ParseText(
-                string.Concat(ImplicitUsings.Select(u => $"global using global::{u};\n")),
+                string.Concat(implicitUsings.Select(u => $"global using global::{u};\n"))
+                    + (extraSource is null ? "" : extraSource + "\n"),
                 ParseOptions,
                 path: "ImplicitUsings.g.cs"
             ),
         };
 
-        foreach (var fence in unit.Fences)
+        foreach (var fence in fences)
             trees.Add(
                 CSharpSyntaxTree.ParseText(
                     $"#line {fence.FirstCodeLine} \"{fence.Page}\"\n{fence.Code}\n",
@@ -193,7 +487,8 @@ public static class SnippetCompiler
                 )
             );
 
-        foreach (var context in ContextFilesFor(unit.Page))
+        // The context files join the project; a test project sees them through its reference.
+        foreach (var context in withContext ? ContextFilesFor(page) : [])
             trees.Add(
                 CSharpSyntaxTree.ParseText(
                     File.ReadAllText(context),
@@ -206,18 +501,20 @@ public static class SnippetCompiler
             t.GetCompilationUnitRoot().Members.OfType<GlobalStatementSyntax>().Any()
         );
 
-        var compilation = CSharpCompilation.Create(
-            "Snippet",
+        return CSharpCompilation.Create(
+            assemblyName,
             trees,
-            References.Value,
+            references,
             new CSharpCompilationOptions(
                 executable ? OutputKind.ConsoleApplication : OutputKind.DynamicallyLinkedLibrary,
                 nullableContextOptions: NullableContextOptions.Enable,
                 specificDiagnosticOptions: MSBuildNoWarn
             )
         );
+    }
 
-        return compilation
+    private static IReadOnlyList<string> Report(CSharpCompilation compilation) =>
+        compilation
             .GetDiagnostics()
             .Where(d =>
                 !d.IsSuppressed
@@ -227,7 +524,9 @@ public static class SnippetCompiler
             .ThenBy(d => d.Location.GetMappedLineSpan().StartLinePosition.Line)
             .Select(Format)
             .ToList();
-    }
+
+    private static bool StartsWith(string path, string prefix) =>
+        Path.GetFileName(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
 
     private static string Format(Diagnostic diagnostic)
     {
@@ -239,7 +538,7 @@ public static class SnippetCompiler
         return $"{where}: {severity} {diagnostic.Id}: {diagnostic.GetMessage()}";
     }
 
-    private static IReadOnlyList<MetadataReference> LoadReferences()
+    private static IReadOnlyList<MetadataReference> LoadReferences(bool tests)
     {
         var list = Path.Combine(AppContext.BaseDirectory, "snippet-references.txt");
         if (!File.Exists(list))
@@ -251,9 +550,8 @@ public static class SnippetCompiler
         return File.ReadAllLines(list)
             .Where(line => line.Length > 0)
             .Where(path =>
-                !TestOnlyAssemblyPrefixes.Any(prefix =>
-                    Path.GetFileName(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                )
+                !TestOnlyAssemblyPrefixes.Any(prefix => StartsWith(path, prefix))
+                || (tests && TestFrameworkAssemblyPrefixes.Any(prefix => StartsWith(path, prefix)))
             )
             .Distinct(StringComparer.Ordinal)
             .Select(path => (MetadataReference)MetadataReference.CreateFromFile(path))
