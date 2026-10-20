@@ -77,7 +77,8 @@ public static class TwinEngine
             ),
         };
 
-        var answers = (JsonArray)JsonNode.Parse(Run(engineRoot, request.ToJsonString()))!;
+        var answers = (JsonArray)
+            JsonNode.Parse(Run(engineRoot, "tools/replay-sequences.mjs", request.ToJsonString()))!;
         return answers
             .Select(sequence =>
                 (IReadOnlyList<Answer>)
@@ -92,16 +93,67 @@ public static class TwinEngine
             .ToList();
     }
 
+    /// <summary>
+    /// Checks each of <paramref name="irs"/> against <c>conformance/ir.schema.json</c> with the engine's validator
+    /// (<c>tools/conformance/ir-schema.mjs</c>), and returns each one's errors, empty when it is valid.
+    /// </summary>
+    public static IReadOnlyList<IReadOnlyList<string>> ValidateIrs(IReadOnlyList<JsonObject> irs)
+    {
+        var engineRoot = EngineRoot();
+        var request = new JsonArray(irs.Select(ir => (JsonNode)ir.DeepClone()).ToArray());
+        var answers = (JsonArray)
+            JsonNode.Parse(
+                Run(engineRoot, "tools/conformance/ir-schema.mjs", request.ToJsonString())
+            )!;
+        return answers
+            .Select(errors =>
+                (IReadOnlyList<string>)
+                    ((JsonArray)errors!).Select(e => e!.GetValue<string>()).ToList()
+            )
+            .ToList();
+    }
+
+    /// <summary>
+    /// Runs the conformance runner (<c>tools/conformance/run.mjs --stdio</c>) with <paramref name="answer"/> as its
+    /// testee: each request line the runner writes is answered with the line <paramref name="answer"/> returns.
+    /// Returns the runner's exit code (0 when every case passed) and its report.
+    /// </summary>
+    public static (int ExitCode, string Report) RunConformance(Func<string, string> answer)
+    {
+        var engineRoot = EngineRoot();
+        var start = new ProcessStartInfo("node", "tools/conformance/run.mjs --stdio")
+        {
+            WorkingDirectory = engineRoot,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using var process = Process.Start(start)!;
+        var stderr = process.StandardError.ReadToEndAsync();
+        var conversation = Task.Run(() =>
+        {
+            while (process.StandardOutput.ReadLine() is { } request)
+            {
+                process.StandardInput.WriteLine(answer(request));
+                process.StandardInput.Flush();
+            }
+        });
+
+        // The test owns its wait (ADR 0014): the runner finishes well within it, or the test fails.
+        if (!conversation.Wait(NodeTimeout) || !process.WaitForExit(NodeTimeout))
+        {
+            process.Kill(entireProcessTree: true);
+            Assert.Fail($"tools/conformance/run.mjs did not finish within {NodeTimeout}.");
+        }
+        return (process.ExitCode, stderr.GetAwaiter().GetResult());
+    }
+
     private static string EngineRoot()
     {
         if (!NodeIsAvailable())
             Unavailable("node is not on PATH.");
-        if (FixturePaths.MachinesRoot is not { } machinesRoot)
-        {
-            Unavailable("Trax.Api.StateMachine is not checked out beside this folder.");
-            throw new UnreachableException();
-        }
-        return Directory.GetParent(machinesRoot)!.FullName;
+        return Directory.GetParent(FixturePaths.MachinesRoot)!.FullName;
     }
 
     // Skips the test on a developer's machine; fails it under CI, where the engine is always installed.
@@ -115,9 +167,9 @@ public static class TwinEngine
         Assert.Ignore($"The TypeScript twin cannot run: {why} Skipping the cross-engine check.");
     }
 
-    private static string Run(string engineRoot, string request)
+    private static string Run(string engineRoot, string script, string request)
     {
-        var start = new ProcessStartInfo("node", "tools/replay-sequences.mjs")
+        var start = new ProcessStartInfo("node", script)
         {
             WorkingDirectory = engineRoot,
             RedirectStandardInput = true,
@@ -135,14 +187,12 @@ public static class TwinEngine
         if (!process.WaitForExit(NodeTimeout))
         {
             process.Kill(entireProcessTree: true);
-            Assert.Fail($"replay-sequences.mjs did not answer within {NodeTimeout}.");
+            Assert.Fail($"{script} did not answer within {NodeTimeout}.");
         }
 
         if (process.ExitCode == MissingDependencies)
             Unavailable("its dependencies are not installed (npm ci in Trax.Api.StateMachine).");
-        process
-            .ExitCode.Should()
-            .Be(0, $"replay-sequences.mjs failed: {stderr.GetAwaiter().GetResult()}");
+        process.ExitCode.Should().Be(0, $"{script} failed: {stderr.GetAwaiter().GetResult()}");
         return stdout.GetAwaiter().GetResult();
     }
 
