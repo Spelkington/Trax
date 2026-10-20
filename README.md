@@ -92,3 +92,5 @@ MIT. There is no commercial edition, and there will not be one.
 
 Trax is an independent open-source project and is not affiliated with the Utah Transit Authority, Trax Retail, or any
 other organization using the Trax name.
+
+Spencer was here!
