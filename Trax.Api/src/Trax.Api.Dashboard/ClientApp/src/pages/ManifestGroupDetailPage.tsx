@@ -13,8 +13,11 @@ import {
   UPDATE_MANIFEST_GROUP,
 } from "../graphql/mutations";
 import { StateBadge } from "../components/StateBadge";
-import { DagGraph } from "../components/DagGraph";
-import { computeDagLayout } from "../lib/dagLayout";
+import { Graph } from "../components/Graph";
+import { GROUP_GRAPH_LEGEND, groupGraph } from "../lib/groupGraph";
+import { RunSparkline } from "../components/schedules";
+import { useGroupGraphStatus } from "../lib/schedules";
+import { usePoll } from "../lib/poll";
 import type {
   ExecutionSummary,
   ManifestGroupDependencyGraph,
@@ -23,6 +26,8 @@ import type {
   ManifestSummary,
   PagedResult,
 } from "../types";
+import { confirmAction } from "../lib/confirm";
+import { toast } from "../lib/toast";
 
 interface DetailData {
   operations: {
@@ -52,32 +57,54 @@ export function ManifestGroupDetailPage() {
 
   async function save(input: Record<string, unknown>) {
     const r = await update({ id, input });
-    if (r.error) alert(r.error.message);
+    const res = r.data?.operations?.manifestGroups?.updateManifestGroup;
+    if (r.error) toast(r.error.message, "error");
+    else if (res?.success) toast(res.message || "Group saved.", "success");
+    else toast(res?.message ?? "The group was not saved.", "error");
     refetch();
   }
-  async function act(fn: typeof triggerGroup, msg: string) {
-    if (!confirm(msg)) return;
+  async function act(
+    fn: typeof triggerGroup,
+    field: "triggerGroup" | "cancelGroup",
+    request: { title: string; message: string; danger?: boolean },
+  ) {
+    if (!(await confirmAction(request))) return;
     const r = await fn({ groupId: id });
-    if (r.error) alert(r.error.message);
+    const res = r.data?.operations?.[field];
+    if (r.error) toast(r.error.message, "error");
+    else if (res?.success) toast(res.message || "Done.", "success");
+    else toast(res?.message ?? "Nothing changed.", "error");
     refetch();
   }
 
   return (
     <div>
-      <Link to="/groups" className="text-sm text-accent-fg hover:underline">
+      <Link to="/schedules/groups" className="text-sm text-accent-fg hover:underline">
         ← All groups
       </Link>
       <h1 className="text-2xl font-bold text-fg mt-2 mb-6">{group.name}</h1>
 
       <GroupStatCards groupId={id} />
+      <RunSparkline scope="GROUP" id={id} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <GroupSettings
           key={group.id}
           group={group}
           onSave={save}
-          onTrigger={() => act(triggerGroup, `Trigger every manifest in "${group.name}"?`)}
-          onCancel={() => act(cancelGroup, `Cancel running executions in "${group.name}"?`)}
+          onTrigger={() =>
+            act(triggerGroup, "triggerGroup", {
+              title: "Queue group",
+              message: `Queue every manifest in "${group.name}" now?`,
+            })
+          }
+          onCancel={() =>
+            act(cancelGroup, "cancelGroup", {
+              title: "Cancel group",
+              message: `Cancel every pending and running run in "${group.name}"?`,
+              danger: true,
+            })
+          }
         />
 
         <div className="bg-surface rounded-lg border border-line p-5">
@@ -144,7 +171,7 @@ function GroupManifests({ groupId }: { groupId: number }) {
           {items.map((m) => (
             <li key={m.id} className="py-2 flex items-center justify-between">
               <Link
-                to={`/manifests/${m.id}`}
+                to={`/schedules/${m.id}`}
                 className="text-accent-fg hover:underline"
               >
                 {shortName(m.name)}
@@ -166,7 +193,7 @@ function GroupManifests({ groupId }: { groupId: number }) {
   );
 }
 
-// ── Recent executions across the group ──────────────────────────────────────
+// ── Recent runs across the group ──────────────────────────────────────
 function GroupExecutions({ groupId }: { groupId: number }) {
   const [{ data }] = useQuery<{ operations: { executions: PagedResult<ExecutionSummary> } }>({
     query: EXECUTIONS,
@@ -176,16 +203,16 @@ function GroupExecutions({ groupId }: { groupId: number }) {
   return (
     <div className="mt-6 bg-surface rounded-lg border border-line p-5">
       <h2 className="text-sm font-semibold text-fg mb-3">
-        Recent executions
+        Recent runs
       </h2>
       {items.length === 0 ? (
-        <p className="text-sm text-muted">No executions yet.</p>
+        <p className="text-sm text-muted">No runs yet.</p>
       ) : (
         <ul className="divide-y divide-line text-sm">
           {items.map((e) => (
             <li key={e.id} className="py-2 flex items-center justify-between">
               <Link
-                to={`/executions/${e.id}`}
+                to={`/runs/${e.id}`}
                 className="text-accent-fg hover:underline"
               >
                 {shortName(e.name)}
@@ -234,7 +261,7 @@ function GroupSettings({
     <div className="bg-surface rounded-lg border border-line p-5">
       <h2 className="text-sm font-semibold text-fg mb-4">Settings</h2>
       <div className="space-y-4 text-sm">
-        <Field label="Max active jobs (blank = unlimited)">
+        <Field label="Max active jobs in this group (blank = no group limit)">
           <input
             value={maxActive}
             onChange={(e) => setMaxActive(e.target.value.replace(/\D/g, ""))}
@@ -267,7 +294,7 @@ function GroupSettings({
 
       <div className="mt-6 pt-4 border-t border-line flex gap-3">
         <button onClick={onTrigger} className="text-sm text-accent-fg hover:underline">
-          Trigger group
+          Queue group
         </button>
         <button onClick={onCancel} className="text-sm text-danger-fg hover:underline">
           Cancel group
@@ -285,14 +312,9 @@ function Dag({
   focalId: number;
 }) {
   const navigate = useNavigate();
-  const layout = useMemo(
-    () =>
-      computeDagLayout(
-        graph.nodes.map((n) => ({ id: n.id, label: n.name, isHighlighted: n.isHighlighted })),
-        graph.edges.map((e) => ({ fromId: e.fromId, toId: e.toId })),
-      ),
-    [graph],
-  );
+  const status = useGroupGraphStatus(graph);
+  usePoll(status.refetch);
+  const drawn = useMemo(() => groupGraph(graph, status.statuses), [graph, status.statuses]);
 
   // A lone focal node means the group has no cross-group dependencies.
   if (graph.nodes.length <= 1 && graph.edges.length === 0)
@@ -303,19 +325,23 @@ function Dag({
     );
 
   return (
-    <DagGraph
-      layout={layout}
-      onNodeClick={(id) => id !== focalId && navigate(`/groups/${id}`)}
+    <Graph
+      nodes={drawn.nodes}
+      edges={drawn.edges}
+      ariaLabel="Dependency graph"
+      legend={GROUP_GRAPH_LEGEND}
+      selectedId={String(focalId)}
+      onSelect={(id) => id !== String(focalId) && navigate(`/schedules/groups/${id}`)}
     />
   );
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div>
-      <label className="block text-xs text-muted mb-1">{label}</label>
+    <label className="block">
+      <span className="block text-xs text-muted mb-1">{label}</span>
       {children}
-    </div>
+    </label>
   );
 }
 

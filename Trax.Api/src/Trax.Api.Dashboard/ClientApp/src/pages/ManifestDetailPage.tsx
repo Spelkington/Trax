@@ -5,6 +5,7 @@ import {
   EXECUTIONS,
   MANIFEST_DETAIL,
   MANIFEST_EXCLUSIONS,
+  MANIFEST_SCHEDULE,
   MANIFEST_STATS,
 } from "../graphql/queries";
 import {
@@ -32,8 +33,16 @@ import type {
   ManifestDetail,
   ManifestExclusion,
   ManifestExecutionStats,
+  ManifestSchedule,
   PagedResult,
 } from "../types";
+import { useAnswers } from "../lib/answerable";
+import { useNow } from "../lib/useNow";
+import { RunSparkline } from "../components/schedules";
+import { untilText, utcText } from "../lib/schedules";
+import { confirmAction } from "../lib/confirm";
+import { Modal } from "../components/Modal";
+import { offersDecisions, useTrainsAskingDecisions } from "../lib/decisions";
 
 interface ManData {
   operations: { manifestDetail: ManifestDetail | null };
@@ -53,12 +62,14 @@ export function ManifestDetailPage() {
   const [, setReplay] = useMutation(SET_MANIFESTS_REPLAY_DECISIONS_ON_RETRY);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [later, setLater] = useState(false);
   const m = result.data?.operations?.manifestDetail;
+  const askingDecisions = useTrainsAskingDecisions();
 
   if (result.error && !m)
     return (
       <>
-        <BackLink to="/manifests" label="Manifests" />
+        <BackLink to="/schedules" label="Manifests" />
         <p className="text-danger-fg mt-4">{result.error.message}</p>
       </>
     );
@@ -66,10 +77,21 @@ export function ManifestDetailPage() {
   if (!m) return <NotFound what="manifest" />;
 
   const refetch = () => reexecute({ requestPolicy: "network-only" });
-  async function run(fn: typeof trigger, confirmMsg?: string) {
-    if (confirmMsg && !confirm(confirmMsg)) return;
-    const r = await fn({ externalId: m!.externalId });
+  async function onCancelRuns() {
+    if (
+      !(await confirmAction({
+        title: "Cancel runs",
+        message: `Cancel every running run of "${shortName(m!.name)}"? A running run stops at its next junction.`,
+        danger: true,
+      }))
+    )
+      return;
+    const r = await cancelManifest({ externalId: m!.externalId });
+    const res = r.data?.operations?.cancelManifest;
     if (r.error) toast(r.error.message, "error");
+    else if (!res?.success) toast(res?.message ?? "Could not cancel its runs.", "error");
+    else if (res.count === 0) toast("No run of it is pending or running.", "info");
+    else toast(`Cancellation requested for ${res.count} run(s).`, "success");
     refetch();
   }
 
@@ -77,16 +99,16 @@ export function ManifestDetailPage() {
   // replaying the failed run's decisions.
   async function onTrigger(askAfresh: boolean) {
     const what = askAfresh
-      ? `Run "${shortName(m!.name)}" now, asking afresh?`
-      : `Trigger "${shortName(m!.name)}" now?`;
-    if (!confirm(what)) return;
+      ? `Queue "${shortName(m!.name)}" now, asking afresh?`
+      : `Queue "${shortName(m!.name)}" now?`;
+    if (!(await confirmAction({ title: askAfresh ? "Queue now, asking afresh" : "Queue now", message: what }))) return;
     setBusy(true);
     const r = await trigger({ externalId: m!.externalId, askAfresh });
     setBusy(false);
     const res = r.data?.operations?.triggerManifest;
     if (r.error) toast(r.error.message, "error");
     else if (res?.success) toast(res.message || `${shortName(m!.name)} has been queued.`, "success");
-    else toast(res?.message ?? "Could not trigger.", "error");
+    else toast(res?.message ?? "Could not queue it.", "error");
     refetch();
   }
 
@@ -104,23 +126,39 @@ export function ManifestDetailPage() {
     refetch();
   }
 
-  async function onTriggerLater() {
-    const mins = prompt("Trigger in how many minutes?", "5");
-    if (mins == null) return;
-    const n = Number(mins);
-    if (!Number.isFinite(n) || n <= 0) {
-      toast("Enter a positive number of minutes.", "error");
+  // The switch beside the heading. Disabling asks first, since the manifest then stops running on
+  // its schedule; enabling does not.
+  async function onEnabledChange(on: boolean) {
+    if (
+      !on &&
+      !(await confirmAction({
+        title: "Disable manifest",
+        message: `Disable "${shortName(m!.name)}"? It does not run on its schedule until it is enabled again.`,
+        danger: true,
+      }))
+    )
       return;
-    }
-    const delay = `PT${Math.floor(n)}M`; // ISO 8601 duration
-    const r = await triggerDelayed({ externalId: m!.externalId, delay });
+    setBusy(true);
+    const r = await (on ? enable : disable)({ externalId: m!.externalId });
+    setBusy(false);
     if (r.error) toast(r.error.message, "error");
-    else toast(`Scheduled in ${Math.floor(n)}m.`, "success");
+    refetch();
+  }
+
+  async function onQueueLater(minutes: number) {
+    setLater(false);
+    const delay = `PT${minutes}M`; // ISO 8601 duration
+    const r = await triggerDelayed({ externalId: m!.externalId, delay });
+    const res = r.data?.operations?.triggerManifestDelayed;
+    if (r.error) toast(r.error.message, "error");
+    else if (res?.success) toast(`Queued to run in ${minutes} min.`, "success");
+    else toast(res?.message ?? "Could not queue it.", "error");
+    refetch();
   }
 
   return (
     <div>
-      <BackLink to="/manifests" label="Manifests" />
+      <BackLink to="/schedules" label="Manifests" />
       <div className="flex items-center gap-3 mt-2 mb-6">
         <h1 className="text-2xl font-bold text-fg">
           {shortName(m.name)}
@@ -134,9 +172,23 @@ export function ManifestDetailPage() {
         >
           {m.isEnabled ? "Enabled" : "Disabled"}
         </span>
+        <label className="ml-auto inline-flex items-center gap-2 text-sm text-fg-2 cursor-pointer">
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label="Manifest enabled"
+            checked={m.isEnabled}
+            disabled={busy}
+            onChange={(e) => onEnabledChange(e.target.checked)}
+          />
+          Runs on its schedule
+        </label>
       </div>
 
       <StatCards manifestId={m.id} />
+      {/* Keyed by the switch, so enabling or disabling reads the next runs again. */}
+      <SchedulePanel key={String(m.isEnabled)} manifestId={m.id} isEnabled={m.isEnabled} />
+      <RunSparkline scope="MANIFEST" id={m.id} />
 
       <DetailPanel title="Details">
         <Fields
@@ -144,7 +196,7 @@ export function ManifestDetailPage() {
             ["ID", m.id],
             ["External ID", m.externalId],
             ["Name", m.name],
-            ["Schedule type", m.scheduleType],
+            ["Schedule type", enumLabel(m.scheduleType)],
             ["Cron", m.cronExpression ?? "—"],
             ["Interval (s)", m.intervalSeconds ?? "—"],
             ["Variance (s)", m.varianceSeconds ?? "—"],
@@ -157,14 +209,14 @@ export function ManifestDetailPage() {
             ["Priority", m.priority],
             [
               "Group",
-              <Link className="text-accent-fg hover:underline" to={`/groups/${m.manifestGroupId}`}>
+              <Link className="text-accent-fg hover:underline" to={`/schedules/groups/${m.manifestGroupId}`}>
                 {m.manifestGroupName ?? `#${m.manifestGroupId}`}
               </Link>,
             ],
             [
               "Depends on",
               m.dependsOnManifestId ? (
-                <Link className="text-accent-fg hover:underline" to={`/manifests/${m.dependsOnManifestId}`}>
+                <Link className="text-accent-fg hover:underline" to={`/schedules/${m.dependsOnManifestId}`}>
                   #{m.dependsOnManifestId}
                 </Link>
               ) : (
@@ -175,32 +227,36 @@ export function ManifestDetailPage() {
             [
               "Queue and dead letters",
               <span>
-                <Link className="text-accent-fg hover:underline" to={`/work-queue?manifestId=${m.id}`}>
+                <Link className="text-accent-fg hover:underline" to={`/runs/queued?manifestId=${m.id}`}>
                   Work queue entries
                 </Link>
                 {" · "}
-                <Link className="text-accent-fg hover:underline" to={`/dead-letters?manifestId=${m.id}`}>
+                <Link className="text-accent-fg hover:underline" to={`/runs/dead-letters?manifestId=${m.id}`}>
                   Dead letters
                 </Link>
               </span>,
             ],
-            [
-              "Replay decisions on retry",
-              <label
-                className="inline-flex items-center gap-2 cursor-pointer"
-                title="On: a retry of a failed run replays the decisions that run recorded. Off: retries ask the model afresh."
-              >
-                <input
-                  type="checkbox"
-                  role="switch"
-                  aria-label="Replay decisions on retry"
-                  checked={m.replayDecisionsOnRetry !== false}
-                  disabled={busy}
-                  onChange={(e) => onReplayChange(e.target.checked)}
-                />
-                {m.replayDecisionsOnRetry !== false ? "Yes" : "No (retries ask afresh)"}
-              </label>,
-            ],
+            ...(offersDecisions(askingDecisions, [m.name])
+              ? ([
+                [
+                  "Replay decisions on retry",
+                  <label
+                    className="inline-flex items-center gap-2 cursor-pointer"
+                    title="On: a retry of a failed run replays the decisions that run recorded. Off: retries ask the model afresh."
+                  >
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      aria-label="Replay decisions on retry"
+                      checked={m.replayDecisionsOnRetry !== false}
+                      disabled={busy}
+                      onChange={(e) => onReplayChange(e.target.checked)}
+                    />
+                    {m.replayDecisionsOnRetry !== false ? "Yes" : "No (retries ask afresh)"}
+                  </label>,
+                ],
+                ] as [string, React.ReactNode][])
+              : []),
           ]}
         />
         <div className="mt-4 flex flex-wrap gap-4">
@@ -209,22 +265,25 @@ export function ManifestDetailPage() {
             disabled={busy}
             className="text-sm text-accent-fg hover:underline disabled:opacity-50"
           >
-            Trigger
+            Queue now
           </button>
+          {offersDecisions(askingDecisions, [m.name]) && (
+            <button
+              onClick={() => onTrigger(true)}
+              disabled={busy}
+              title="Run now; if this releases a queued retry, it asks the model afresh instead of replaying the failed run's decisions."
+              className="text-sm text-accent-fg hover:underline disabled:opacity-50"
+            >
+              Queue now, ask afresh
+            </button>
+          )}
           <button
-            onClick={() => onTrigger(true)}
-            disabled={busy}
-            title="Run now; if this releases a queued retry, it asks the model afresh instead of replaying the failed run's decisions."
-            className="text-sm text-accent-fg hover:underline disabled:opacity-50"
-          >
-            Trigger, ask afresh
-          </button>
-          <button
-            onClick={onTriggerLater}
+            onClick={() => setLater(true)}
             className="text-sm text-accent-fg hover:underline"
           >
-            Trigger later
+            Queue later
           </button>
+          {later && <QueueLaterDialog onQueue={onQueueLater} onClose={() => setLater(false)} />}
           <button
             onClick={() => setEditing(true)}
             className="text-sm text-accent-fg hover:underline"
@@ -232,22 +291,11 @@ export function ManifestDetailPage() {
             Edit
           </button>
           <button
-            onClick={() =>
-              run(cancelManifest, `Cancel all running executions of "${shortName(m.name)}"?`)
-            }
+            onClick={onCancelRuns}
             className="text-sm text-danger-fg hover:underline"
           >
             Cancel runs
           </button>
-          {m.isEnabled ? (
-            <button onClick={() => run(disable)} className="text-sm text-fg-2 hover:underline">
-              Disable
-            </button>
-          ) : (
-            <button onClick={() => run(enable)} className="text-sm text-ok-fg hover:underline">
-              Enable
-            </button>
-          )}
         </div>
       </DetailPanel>
 
@@ -267,6 +315,47 @@ export function ManifestDetailPage() {
         />
       )}
     </div>
+  );
+}
+
+// ── When it runs ───────────────────────────────────────────────────────────
+// The schedule in words and the next runs, as the manifest manager's own due-ness check reads
+// them. Not drawn where the client cannot answer it (the demo, until the recordings hold it).
+function SchedulePanel({ manifestId, isEnabled }: { manifestId: number; isEnabled: boolean }) {
+  const answered = useAnswers("ManifestSchedule");
+  const [{ data }] = useQuery<{ operations: { manifestDetail: ManifestSchedule | null } }>({
+    query: MANIFEST_SCHEDULE,
+    variables: { id: manifestId, count: 5 },
+    pause: !answered,
+    requestPolicy: "cache-and-network",
+  });
+  const now = useNow(30_000);
+  const s = data?.operations?.manifestDetail;
+  if (!answered || !s) return null;
+  return (
+    <section aria-label="Schedule" className="mb-6 rounded-lg border border-line bg-surface p-4">
+      <h2 className="text-sm font-semibold text-fg">Schedule</h2>
+      <p className="mt-1 text-lg text-fg">{s.scheduleText}</p>
+      {s.nextRuns.length === 0 ? (
+        <p className="mt-2 text-sm text-muted">
+          {isEnabled
+            ? "No upcoming run: it runs when triggered or when what it depends on succeeds."
+            : "No upcoming run while it is disabled."}
+        </p>
+      ) : (
+        <>
+          <h3 className="mt-3 text-xs font-medium text-muted">Next runs</h3>
+          <ol className="mt-1 space-y-0.5 text-sm">
+            {s.nextRuns.map((t) => (
+              <li key={t} className="flex gap-3">
+                <span className="w-48 text-fg-2">{utcText(t)}</span>
+                <span className="text-muted">{untilText(t, now)}</span>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -349,7 +438,7 @@ function titleCase(s: string): string {
   return s.charAt(0) + s.slice(1).toLowerCase();
 }
 
-// ── Recent execution history ────────────────────────────────────────────────
+// ── Recent run history ────────────────────────────────────────────────
 function ExecutionHistory({ manifestId }: { manifestId: number }) {
   const [{ data }] = useQuery<{ operations: { executions: PagedResult<ExecutionSummary> } }>({
     query: EXECUTIONS,
@@ -357,9 +446,9 @@ function ExecutionHistory({ manifestId }: { manifestId: number }) {
   });
   const items = data?.operations?.executions?.items ?? [];
   return (
-    <DetailPanel title="Recent executions">
+    <DetailPanel title="Recent runs">
       {items.length === 0 ? (
-        <p className="text-sm text-muted">No executions yet.</p>
+        <p className="text-sm text-muted">No runs yet.</p>
       ) : (
         <table className="w-full text-sm">
           <thead className="text-left text-muted">
@@ -374,7 +463,7 @@ function ExecutionHistory({ manifestId }: { manifestId: number }) {
               <tr key={e.id}>
                 <td className="py-1">
                   <Link
-                    to={`/executions/${e.id}`}
+                    to={`/runs/${e.id}`}
                     className="text-accent-fg hover:underline"
                   >
                     #{e.id}
@@ -398,4 +487,45 @@ function ExecutionHistory({ manifestId }: { manifestId: number }) {
 function shortName(fullName: string): string {
   const parts = fullName.split(".");
   return parts[parts.length - 1] || fullName;
+}
+
+/** Asks how many minutes from now the manifest should be queued. */
+function QueueLaterDialog({ onQueue, onClose }: { onQueue: (minutes: number) => void; onClose: () => void }) {
+  const [text, setText] = useState("5");
+  const minutes = Math.floor(Number(text));
+  const valid = Number.isFinite(minutes) && minutes > 0;
+  return (
+    <Modal title="Queue later" onClose={onClose}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (valid) onQueue(minutes);
+        }}
+      >
+        <label className="block text-sm text-fg-2">
+          Minutes from now
+          <input
+            autoFocus
+            type="number"
+            min={1}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="mt-1 w-full rounded-md border border-line bg-field px-3 py-1.5 text-sm text-fg"
+          />
+        </label>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-fg-2 hover:bg-hover">
+            Keep it
+          </button>
+          <button
+            type="submit"
+            disabled={!valid}
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50"
+          >
+            Queue later
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }

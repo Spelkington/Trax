@@ -16,6 +16,7 @@ import { enumLabel, formatTime, shortName } from "../lib/format";
 import { useRefetchOnChange } from "../lib/useRefetchOnChange";
 import { toast } from "../lib/toast";
 import type { WorkQueueDetail } from "../types";
+import { confirmAction } from "../lib/confirm";
 
 interface WqData {
   operations: { workQueue: { detail: WorkQueueDetail | null } };
@@ -38,7 +39,7 @@ export function WorkQueueDetailPage() {
   if (result.error && !w)
     return (
       <>
-        <BackLink to="/work-queue" label="Work queue" />
+        <BackLink to="/runs/queued" label="Queued" />
         <p className="text-danger-fg mt-4">{result.error.message}</p>
       </>
     );
@@ -46,7 +47,7 @@ export function WorkQueueDetailPage() {
   if (!w) return <NotFound what="work queue entry" />;
 
   async function onCancel() {
-    if (!confirm(`Cancel queued entry #${id}?`)) return;
+    if (!(await confirmAction({ title: "Cancel queued entry", message: `Cancel queued entry #${id}? Its run never starts.`, danger: true }))) return;
     setBusy(true);
     const r = await cancelEntry({ id });
     setBusy(false);
@@ -66,7 +67,7 @@ export function WorkQueueDetailPage() {
 
   return (
     <div>
-      <BackLink to="/work-queue" label="Work queue" />
+      <BackLink to="/runs/queued" label="Queued" />
       <div className="flex items-center gap-3 mt-2 mb-6">
         <h1 className="text-2xl font-bold text-fg">
           {shortName(w.trainName)}
@@ -99,13 +100,13 @@ export function WorkQueueDetailPage() {
               w.confirmedAt
                 ? formatTime(w.confirmedAt)
                 : w.status === "QUEUED"
-                  ? "Not yet: staged until its OnQueue hook returns"
+                  ? "Not yet: staged until the train's queue check finishes"
                   : "—",
             ],
             [
               "Subject",
               w.subjectKey ? (
-                <DetailLink to={`/work-queue?subjectKey=${encodeURIComponent(w.subjectKey)}`}>{w.subjectKey}</DetailLink>
+                <DetailLink to={`/runs/queued?subjectKey=${encodeURIComponent(w.subjectKey)}`}>{w.subjectKey}</DetailLink>
               ) : (
                 "—"
               ),
@@ -115,7 +116,7 @@ export function WorkQueueDetailPage() {
                   [
                     "Waiting on",
                     <span>
-                      <DetailLink to={`/work-queue/${waitingOn.id}`}>Entry {waitingOn.id}</DetailLink>
+                      <DetailLink to={`/runs/queued/${waitingOn.id}`}>Entry {waitingOn.id}</DetailLink>
                       , {waitingOn.why}
                     </span>,
                   ],
@@ -125,15 +126,15 @@ export function WorkQueueDetailPage() {
             [
               "Manifest",
               w.manifestId != null ? (
-                <DetailLink to={`/manifests/${w.manifestId}`}>#{w.manifestId}</DetailLink>
+                <DetailLink to={`/schedules/${w.manifestId}`}>#{w.manifestId}</DetailLink>
               ) : (
                 "—"
               ),
             ],
             [
-              "Execution",
+              "Run",
               w.metadataId != null ? (
-                <DetailLink to={`/executions/${w.metadataId}`}>#{w.metadataId}</DetailLink>
+                <DetailLink to={`/runs/${w.metadataId}`}>#{w.metadataId}</DetailLink>
               ) : (
                 "—"
               ),
@@ -141,7 +142,7 @@ export function WorkQueueDetailPage() {
             [
               "Replays decisions of",
               w.replayDecisionsOf != null ? (
-                <DetailLink to={`/executions/${w.replayDecisionsOf}`}>#{w.replayDecisionsOf}</DetailLink>
+                <DetailLink to={`/runs/${w.replayDecisionsOf}`}>#{w.replayDecisionsOf}</DetailLink>
               ) : (
                 "None: it asks afresh"
               ),
@@ -149,7 +150,7 @@ export function WorkQueueDetailPage() {
             [
               "Dead letter",
               w.deadLetterId != null ? (
-                <DetailLink to={`/dead-letters/${w.deadLetterId}`}>#{w.deadLetterId}</DetailLink>
+                <DetailLink to={`/runs/dead-letters/${w.deadLetterId}`}>#{w.deadLetterId}</DetailLink>
               ) : (
                 "—"
               ),

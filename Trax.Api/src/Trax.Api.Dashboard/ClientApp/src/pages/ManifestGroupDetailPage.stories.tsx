@@ -2,13 +2,14 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import { ManifestGroupDetailPage } from "./ManifestGroupDetailPage";
 import { groupDetailScenario } from "../mock/scenarios";
+import { setAutoConfirm } from "../lib/confirm";
 
 const meta = {
   title: "Pages/Manifest group detail",
   component: ManifestGroupDetailPage,
   parameters: {
-    routePath: "/groups/:id",
-    route: "/groups/1",
+    routePath: "/schedules/groups/:id",
+    route: "/schedules/groups/1",
     mock: groupDetailScenario,
   },
 } satisfies Meta<typeof ManifestGroupDetailPage>;
@@ -17,16 +18,15 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 function acceptConfirm() {
-  const original = window.confirm;
-  window.confirm = () => true;
+  setAutoConfirm(true);
   return () => {
-    window.confirm = original;
+    setAutoConfirm(null);
   };
 }
 
 export const Mock: Story = {};
 
-export const Real: Story = { parameters: { real: true, route: "/groups/200" } };
+export const Real: Story = { parameters: { real: true, route: "/schedules/groups/200" } };
 
 // Edit the group's priority and save.
 export const EditAndSave: Story = {
@@ -72,7 +72,7 @@ export const InputsSanitized: Story = {
 
 // A group with no cap renders an empty max-active field with the ∞ placeholder.
 export const UnlimitedGroupShowsPlaceholder: Story = {
-  parameters: { route: "/groups/2" },
+  parameters: { route: "/schedules/groups/2" },
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByRole("heading", { name: "beta-group" })).toBeInTheDocument());
@@ -89,7 +89,7 @@ export const TriggerGroup: Story = {
     const restore = acceptConfirm();
     try {
       await waitFor(() => expect(c.getByRole("heading", { name: "alpha-group" })).toBeInTheDocument());
-      await userEvent.click(c.getByRole("button", { name: "Trigger group" }));
+      await userEvent.click(c.getByRole("button", { name: "Queue group" }));
       await waitFor(() => expect(c.getByRole("heading", { name: "alpha-group" })).toBeInTheDocument());
     } finally {
       restore();

@@ -1,11 +1,14 @@
 import { useMemo } from "react";
 import { useQuery } from "urql";
-import { ENVIRONMENT_NAME } from "../graphql/queries";
+import { Link } from "react-router-dom";
+import { ENVIRONMENT_NAME, SCHEDULER_CONFIG } from "../graphql/queries";
 import { usePollSeconds } from "../lib/poll";
 import { useRefreshStatus } from "../lib/refreshStatus";
 import { useNow } from "../lib/useNow";
 import { environmentBadgeColor } from "../lib/environment";
-import { Clock, RotateCw, TriangleAlert } from "lucide-react";
+import { schedulerPaused } from "../lib/scheduler";
+import { Search } from "./Search";
+import { CirclePause, Clock, RotateCw, TriangleAlert } from "lucide-react";
 
 /**
  * The top bar, as the Blazor DashboardHeader: the host's environment badge, a "Last refresh
@@ -19,6 +22,13 @@ export function DashboardHeader() {
     context,
   });
   const environment = data?.operations?.config?.environmentName ?? "";
+  // Pausing the scheduler stops every schedule and every dispatch, so it shows on every page.
+  const [{ data: scheduler }] = useQuery<{
+    operations: {
+      config: { scheduler: { manifestManagerEnabled: boolean; jobDispatcherEnabled: boolean } | null } | null;
+    } | null;
+  }>({ query: SCHEDULER_CONFIG, context });
+  const paused = schedulerPaused(scheduler?.operations?.config?.scheduler ?? null);
   const { lastRefreshAt, lastError } = useRefreshStatus();
   const pollSeconds = usePollSeconds();
   const now = useNow(500);
@@ -39,6 +49,16 @@ export function DashboardHeader() {
           Environment: {environment}
         </span>
       )}
+      {paused && (
+        <Link
+          to="/system/scheduler"
+          className="flex items-center gap-1 rounded px-2 py-0.5 font-semibold bg-warn-soft text-warn-fg hover:underline"
+        >
+          <CirclePause className="size-3.5" />
+          {paused}
+        </Link>
+      )}
+      <Search />
       <div className="ml-auto flex items-center gap-4">
         {lastError && (
           <span
@@ -66,7 +86,7 @@ export function DashboardHeader() {
             </span>
           </span>
         ) : (
-          <span title="Lists update live over the subscription; set an auto-refresh interval in User settings">
+          <span title="Lists update live over the subscription; set an auto-refresh interval in Preferences">
             Auto-refresh off
           </span>
         )}
@@ -82,3 +102,4 @@ export function DashboardHeader() {
     </header>
   );
 }
+

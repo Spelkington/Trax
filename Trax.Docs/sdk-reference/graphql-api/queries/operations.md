@@ -97,6 +97,8 @@ query {
 | `graphQLName` | `String` | The `Name` set on `[TraxQuery]` or `[TraxMutation]`; null when the field name is derived |
 | `isBroadcastEnabled` | `Boolean!` | Whether the train carries [`[TraxBroadcast]`](/docs/sdk-reference/graphql-api/trax-broadcast-attribute) |
 | `hasQueueSubjectKey` | `Boolean!` | Whether the train overrides [`QueueSubjectKey`](/docs/mediator/queued-work#two-mutations-for-one-record), so its queued runs for one subject run one at a time (an override may still return no key for a given input). A run started with [`runTrain`](/docs/sdk-reference/graphql-api/mutations/work-queue#runtrain) bypasses that serialization and may run alongside queued or in-flight work for the same subject; the dashboard's Run dialog warns about it, and a client offering Run should too |
+| `chain` | `RunGraph!` | The train's declared chain, read without a run: the same nodes, in the same order and places, that [`runGraph`](/docs/sdk-reference/graphql-api/queries/executions#rungraph) draws a run of it on, every one `NOT_REACHED`, with no steps and `metadataId` 0. `hasGraph` is false when the host cannot read the train's chain. Read only when selected, from the chain the host reads once per train |
+| `asksDecisions` | `Boolean!` | True when the train declares a step that asks a decider and records the decision: a `Decide`, or a `Switch`, `Gate` or `Scale` that asks its own question. Only such a train's runs have decisions a requeue can [replay or ask afresh](/docs/sdk-reference/graphql-api/mutations/executions). False when the host cannot read the train's chain |
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -132,7 +134,9 @@ The subscription feed streams every train on an admin host, so the dashboard rea
 
 ## hosts
 
-Rolls up the processes that have executed trains, grouped by `HostInstanceId` from the metadata table. Backs the dashboard's cluster view across a split API + scheduler + worker deployment. Rows without a stamped host instance are ignored.
+The host processes that have beaten in the last day, from `trax.host_heartbeat`. Every host with a data provider
+rewrites its row every 15 seconds whether or not it has work ([Host Tracking](/docs/sdk-reference/configuration/host-tracking#heartbeat)),
+so the list shows an idle host as online and a dead one as offline. Online hosts come first, then by name.
 
 ```graphql
 query {
@@ -141,15 +145,22 @@ query {
       instanceId
       name
       environment
-      lastSeen
-      totalExecutions
+      traxVersion
+      startedAt
+      lastHeartbeat
+      online
+      runsDispatcher
+      runsManifestManager
+      workerSlots
+      workerSlotsInUse
       currentlyRunning
     }
   }
 }
 ```
 
-This is a full aggregation over the metadata table (like `metrics.dashboard`), so treat it as an occasional-refresh read, not a hot poll. `lastSeen` is the most recent execution start on the host, the freshness signal the dashboard renders; there is no separate heartbeat.
+It reads the small heartbeat table and counts each listed host's runs in progress, so it is cheap at any history
+size. A host on a version from before the heartbeat writes no row and is not listed.
 
 **Returns**: `[HostInfo!]!`
 
@@ -157,12 +168,18 @@ This is a full aggregation over the metadata table (like `metrics.dashboard`), s
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `instanceId` | `String!` | Stable per-process id (lives for the process's lifetime) |
-| `name` | `String` | Machine / container host name, if stamped |
-| `environment` | `String` | Hosting environment (e.g. `Production`), if stamped |
-| `lastSeen` | `DateTime!` | Most recent execution start on this host |
-| `totalExecutions` | `Long!` | Total executions attributed to this host |
-| `currentlyRunning` | `Int!` | Executions on this host still `InProgress` |
+| `instanceId` | `String!` | The process's instance id, the one stamped on each run it executes |
+| `name` | `String!` | Machine or container host name |
+| `environment` | `String!` | Hosting environment, such as `server`, `ecs`, `kubernetes` or `lambda` |
+| `traxVersion` | `String!` | The Trax version the process runs |
+| `startedAt` | `DateTime!` | When the process began beating |
+| `lastHeartbeat` | `DateTime!` | When the process last wrote its row |
+| `online` | `Boolean!` | `true` while the last heartbeat is under 45 seconds old (three beats) |
+| `runsDispatcher` | `Boolean!` | The process runs the job dispatcher, switched on |
+| `runsManifestManager` | `Boolean!` | The process runs the manifest manager, switched on |
+| `workerSlots` | `Int` | Local workers the process runs, `null` with none |
+| `workerSlotsInUse` | `Int` | Workers running a job at the last heartbeat, `null` with none |
+| `currentlyRunning` | `Int!` | Runs attributed to this host still `InProgress` |
 
 ## trainStats
 
@@ -262,6 +279,83 @@ query {
 Settings can hold credentials. Like an execution's `input`, they are reachable only under the
 `operations` namespace, so the gate you put on it (`GateOperations` or `RequireAuthorization`)
 decides who reads them. See [Train inputs and the operations gate](/docs/sdk-reference/graphql-api/queries#train-inputs-and-the-operations-gate).
+
+## lookup
+
+Finds what an id, key or name names when you do not know its kind, the read behind the console's search. It calls
+[`IOperationsService.LookupAsync`](/docs/sdk-reference/scheduler-api/i-operations-service#lookupasync).
+
+```graphql
+query {
+  operations {
+    lookup(text: "7f3c0e2a9b1d4c5e8f6a7b8c9d0e1f2a") {
+      kind
+      id
+      label
+      matchedOn
+      machine
+      ownerKind
+      rowId
+    }
+  }
+}
+```
+
+**Returns**: `[LookupMatch!]!`, empty when nothing matches.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | `LookupKind!` | `RUN`, `MANIFEST`, `WORK_QUEUE_ENTRY`, `DEAD_LETTER`, `MACHINE_INSTANCE` or `TRAIN` |
+| `id` | `String!` | The id the kind's read takes: a run, manifest, entry or dead letter id, an instance's GUID, or a train's `fullName` |
+| `label` | `String!` | The train, manifest or machine, with its state |
+| `matchedOn` | `String!` | The field the text matched: `id`, `externalId`, `name` or `subjectKey` |
+| `machine` | `String` | For an instance, its machine; null otherwise |
+| `ownerKind` | `SnapshotOwnerKind` | For an instance, who owns it; null otherwise |
+| `rowId` | `Long` | For an instance, the row [`machineInstance`](/docs/sdk-reference/graphql-api/queries/machine-instances#machineinstance) takes for a user's draft; null otherwise |
+
+Matches are exact, after trimming: runs by id and external id, manifests by id, external id and name, work queue
+entries by id, external id and subject key (those still queued or dispatched), dead letters by id, state-machine
+instances by id, and registered trains by full or friendly name. Each is one read of an indexed column, at most 10
+matches of each kind. An instance is named the way [`machineInstances`](/docs/sdk-reference/graphql-api/queries/machine-instances)
+names it, never by its context or whose a user's draft is. Like every field here it answers to the operations gate.
+
+## attention
+
+What needs an operator's attention, the read behind the console's Overview. It calls
+[`IOperationsService.GetAttentionAsync`](/docs/sdk-reference/scheduler-api/i-operations-service#getattentionasync).
+
+```graphql
+query {
+  operations {
+    attention {
+      asOf
+      scheduler { manifestManagerEnabled jobDispatcherEnabled paused link }
+      deadLetters { trainName reason count oldestDeadLetteredAt link }
+      failingTrains { trainName failedLastHour finishedLastHour lastHourFailureRate baselineFailureRate link }
+      stuckInstances { machine state count link }
+      queue { queued oldestQueuedAt oldestAgeSeconds link }
+      offlineHosts { instanceId hostName lastHeartbeatAt runsDispatcher link }
+    }
+  }
+}
+```
+
+**Returns**: `Attention!`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `scheduler` | `AttentionScheduler!` | Whether the manifest manager and the job dispatcher are switched on; `paused` is true when either is off |
+| `deadLetters` | `[AttentionDeadLetterGroup!]!` | Dead letters awaiting intervention, one group per train and reason, with `count` and `oldestDeadLetteredAt`, largest first |
+| `failingTrains` | `[AttentionFailingTrain!]!` | Trains whose failure rate among runs started in the last hour is above their rate over the seven days before it, highest first |
+| `stuckInstances` | `[AttentionStuckInstances!]!` | Stuck state-machine instances, one group per machine and state, largest first |
+| `queue` | `AttentionQueue!` | Queued entries that are confirmed and due, and how long the oldest has waited |
+| `offlineHosts` | `[AttentionHost!]!` | Hosts that have missed three heartbeats, most recently seen first |
+| `asOf` | `DateTime!` | When the read was made |
+
+Each list holds at most 50 entries. Every entry has a `link`: the console path and query that lists what it counts, such
+as `/runs?state=FAILED&train=Shop.ICheckoutTrain` or `/machines/order?state=Waiting&stuck=true`. A stuck-instance group
+names a machine and a state, never an instance's owner or context. Like every field here it answers to the operations
+gate.
 
 ## See also
 

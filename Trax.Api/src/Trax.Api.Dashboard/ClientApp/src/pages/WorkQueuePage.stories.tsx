@@ -3,11 +3,12 @@ import { expect, userEvent, waitFor, within } from "storybook/test";
 import { WorkQueuePage } from "./WorkQueuePage";
 import { emptyPage, errorOverride, workQueueScenario } from "../mock/scenarios";
 import { USER_OWNED_RUN_CANCEL_REFUSAL, userDraftRunsOverlay } from "../mock/store/overlays";
+import { setAutoConfirm } from "../lib/confirm";
 
 const meta = {
   title: "Pages/WorkQueue",
   component: WorkQueuePage,
-  parameters: { route: "/work-queue", mock: workQueueScenario },
+  parameters: { route: "/runs/queued", mock: workQueueScenario },
 } satisfies Meta<typeof WorkQueuePage>;
 
 export default meta;
@@ -16,12 +17,11 @@ type Story = StoryObj<typeof meta>;
 // A status badge is a <span>; scope to it so the filter dropdown's <option> isn't counted.
 const badge = { selector: "span" } as const;
 
-// The cancel flows call window.confirm; auto-accept it for the duration of a play.
+// The cancel flows ask for confirmation; answer yes for the duration of a play.
 function acceptConfirm() {
-  const original = window.confirm;
-  window.confirm = () => true;
+  setAutoConfirm(true);
   return () => {
-    window.confirm = original;
+    setAutoConfirm(null);
   };
 }
 
@@ -136,8 +136,7 @@ export const QueueTrainDialogFlow: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     await userEvent.click(c.getByRole("button", { name: "Queue train" }));
-    await waitFor(() => expect(c.getByText("Queue a train")).toBeInTheDocument());
-    const dialog = c.getByText("Queue a train").closest("div") as HTMLElement;
+    const dialog = await waitFor(() => c.getByRole("dialog", { name: "Queue a train" }));
     await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(c.queryByText("Queue a train")).not.toBeInTheDocument());
   },
@@ -269,7 +268,7 @@ export const FilterBySubject: Story = {
 
 // The manifest filter narrows to one manifest's entries; it can arrive in the URL.
 export const FilterByManifest: Story = {
-  parameters: { route: "/work-queue?manifestId=42" },
+  parameters: { route: "/runs/queued?manifestId=42" },
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     expect(c.getByLabelText("Manifest id")).toHaveValue("42");
@@ -286,6 +285,6 @@ export const ReplaysColumn: Story = {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByLabelText("Select #603")).toBeInTheDocument());
     const row = c.getByLabelText("Select #603").closest("tr") as HTMLElement;
-    expect(within(row).getByRole("link", { name: "#899" })).toHaveAttribute("href", "/executions/899");
+    expect(within(row).getByRole("link", { name: "#899" })).toHaveAttribute("href", "/runs/899");
   },
 };

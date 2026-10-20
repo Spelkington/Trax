@@ -4,9 +4,9 @@ import { UserSettingsPage } from "./UserSettingsPage";
 import { getOverviewPanels } from "../lib/overviewPanels";
 
 const meta = {
-  title: "Pages/User settings",
+  title: "Pages/Preferences",
   component: UserSettingsPage,
-  parameters: { route: "/settings/user" },
+  parameters: { route: "/preferences" },
 } satisfies Meta<typeof UserSettingsPage>;
 
 export default meta;
@@ -31,7 +31,7 @@ export const ThemeToggle: Story = {
 export const AutoRefresh: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
-    const box = c.getByLabelText("Auto-refresh seconds") as HTMLInputElement;
+    const box = c.getByLabelText("Refresh this page every (seconds)") as HTMLInputElement;
     expect(box).toHaveValue(0);
     await userEvent.clear(box);
     await userEvent.type(box, "15");
@@ -46,9 +46,9 @@ export const OverviewPanelToggles: Story = {
     const failures = c.getByRole("switch", { name: "Show Failures" });
     expect(failures).toBeChecked();
     await userEvent.click(failures);
-    await userEvent.click(c.getByRole("switch", { name: "Show Server Health" }));
+    await userEvent.click(c.getByRole("switch", { name: "Show Summary Cards" }));
     expect(failures).not.toBeChecked();
-    expect(getOverviewPanels()).toMatchObject({ failures: false, serverHealth: false, summaryCards: true });
+    expect(getOverviewPanels()).toMatchObject({ failures: false, summaryCards: false, executionsChart: true });
     await userEvent.click(c.getByRole("button", { name: "Reset default" }));
     await waitFor(() => expect(c.getByRole("switch", { name: "Show Failures" })).toBeChecked());
     expect(Object.values(getOverviewPanels()).every(Boolean)).toBe(true);

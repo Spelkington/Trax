@@ -126,6 +126,10 @@ query {
       scheduledTime
       executor
       replayDecisionsOf
+      childCount
+      invokedBy { machine instanceId ownerKind rowId }
+      workQueueEntryId
+      deadLetterId
     }
   }
 }
@@ -156,6 +160,17 @@ retry that replays; it is null when the run replays nothing, a run queued to ask
 resumed from a [checkpoint](/docs/sdk-reference/train-methods/checkpoint), shown on the dashboard as
 **Resumes**, and `resumeAt` (`String`) the step it resumed at, null when it resumed after the latest
 checkpoint; both are null for a run that ran from the top.
+
+What the run is linked to, so a client can go from it to what started it:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `invokedBy` | `RunInvoker` | The state-machine instance whose [invoking state](/docs/statemachine/invoking-trains) queued the run, or null for a run no machine started. It names `machine`, `instanceId` and `ownerKind`, and `rowId`, the instance's row while it still waits on this run (the key [`machineInstance`](/docs/sdk-reference/graphql-api/queries/machine-instances#machineinstance) takes for a user's draft), null once it has moved on. It never says whose a user's draft is: the run does not record that, and the row is found through the run's own id, which the instance holds as its invoke token |
+| `workQueueEntryId` | `Long` | The [work queue](/docs/sdk-reference/graphql-api/queries/work-queue) entry the run was dispatched from; null for a run that was not queued |
+| `deadLetterId` | `Long` | The [dead letter](/docs/sdk-reference/graphql-api/queries/dead-letters) this run retries, the run its requeue started; null for every other run. A run that failed into a dead letter is not linked to it, because a dead letter records its manifest, not the run that used up the retries |
+
+Each is one indexed read: `ix_work_queue_metadata_id`, `ix_dead_letter_retry_metadata_id`, and the instance's unique
+invoke token. The `RunInvoker` type is `Trax.Api.DTOs.RunInvoker`.
 
 `input` and `output` can hold credentials. They are on this single-row read and on no list; see
 [Train inputs and the operations gate](/docs/sdk-reference/graphql-api/queries#train-inputs-and-the-operations-gate).
@@ -273,6 +288,7 @@ query {
       train
       hasGraph
       hash
+      chainChanged
       moreSteps
       canResume
       nodes {
@@ -368,6 +384,15 @@ node ids were, after a withheld route, or for a node the chain no longer declare
 `unmatchedSteps` rather than dropped. `hasGraph` is false when the host has no graph for the train;
 `nodes` is then empty and every step is unmatched. `moreSteps` says the run recorded more than 500
 steps, so a later node can show as not reached when it ran.
+
+**When the chain has changed.** A run records the hash of its train's chain when it starts (see
+[Run chain hash](/docs/reference/schema-migrations#run-chain-hash-088-sqlite-047)), and `chainChanged`
+is true when that hash differs from `hash`, the chain the host declares now. The nodes are still
+the current chain's, so a run whose node ids match a changed chain is placed on nodes it may not
+have run as drawn: a step that moved, a track whose contents changed. Old chains are not stored, so
+the graph cannot be drawn as it was. `chainChanged` is false when the run recorded no hash (a run
+from before it was recorded, or from a host that skips the startup chain check) and when the host
+has no graph for the train.
 
 **Where a run can resume.** For a failed or cancelled execution, and for one that itself
 resumed, the read also asks the [resume check](/docs/sdk-reference/train-methods/checkpoint#what-can-resume-where)

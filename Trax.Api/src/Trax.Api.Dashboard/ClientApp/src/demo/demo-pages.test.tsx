@@ -10,6 +10,7 @@ import {
   everyPage,
   everySelect,
   newLedger,
+  NOT_RECORDED_YET,
   notOfferedYet,
   pageOf,
   recordedIds,
@@ -19,6 +20,7 @@ import {
   settle,
   type Ledger,
 } from "./harness";
+import { setAutoConfirm } from "../lib/confirm";
 
 // The demo's strict check: a visitor who opens every page, picks every option of every filter and
 // sort, pages every list to its end and opens every row is answered from a recording every time,
@@ -36,17 +38,25 @@ function expectAllRecorded(ledger: Ledger) {
 }
 
 const LIST_PAGES = [
-  "/executions",
-  "/work-queue",
-  "/dead-letters",
-  "/manifests",
-  "/groups",
-  "/logs",
-  "/persisted-operations",
-  // Offered once the recordings hold it (harness.tsx, NOT_RECORDED_YET).
-  ...(notOfferedYet("MachineInstances") ? [] : ["/state-machines"]),
+  "/runs",
+  "/runs/queued",
+  "/runs/dead-letters",
+  "/schedules",
+  "/schedules/groups",
+  "/system/logs",
+  "/api-admin/persisted-operations",
+  "/machines",
 ];
-const OTHER_PAGES = ["/", "/trains", "/cluster", "/realtime", "/settings/user", "/settings/server", "/settings/effects"];
+const OTHER_PAGES = [
+  "/",
+  "/trains",
+  "/system/hosts",
+  "/system/live",
+  "/system/operations",
+  "/preferences",
+  "/system/scheduler",
+  "/system/effects",
+];
 
 describe("every page, filter, sort and page of every list", () => {
   for (const hideAdmin of [true, false]) {
@@ -77,11 +87,11 @@ describe("every page, filter, sort and page of every list", () => {
 
 describe("every row's page", () => {
   const details: [string, string, string][] = [
-    ["ExecutionDetail", "id", "/executions/"],
-    ["WorkQueueDetail", "id", "/work-queue/"],
-    ["DeadLetterDetail", "id", "/dead-letters/"],
-    ["ManifestDetail", "id", "/manifests/"],
-    ["ManifestGroupDetail", "id", "/groups/"],
+    ["ExecutionDetail", "id", "/runs/"],
+    ["WorkQueueDetail", "id", "/runs/queued/"],
+    ["DeadLetterDetail", "id", "/runs/dead-letters/"],
+    ["ManifestDetail", "id", "/schedules/"],
+    ["ManifestGroupDetail", "id", "/schedules/groups/"],
     ["TrainStats", "trainName", "/trains/"],
   ];
   for (const [op, variable, prefix] of details) {
@@ -99,7 +109,7 @@ describe("every row's page", () => {
     }, 240_000);
   }
 
-  test("/persisted-operations/:id for every operation in the store", async () => {
+  test("/api-admin/persisted-operations/:id for every operation in the store", async () => {
     const ledger = newLedger();
     const keys = Object.keys(recordings().queries.PersistedOperationDetail ?? {}).map(
       (k) => JSON.parse(k) as { id: string; tenantKey?: string },
@@ -107,7 +117,7 @@ describe("every row's page", () => {
     expect(keys.length).toBeGreaterThan(0);
     for (const { id, tenantKey } of keys) {
       const query = tenantKey != null ? `?tenant=${encodeURIComponent(tenantKey)}` : "";
-      const { unmount } = renderDemo(`/persisted-operations/${encodeURIComponent(id)}${query}`, ledger);
+      const { unmount } = renderDemo(`/api-admin/persisted-operations/${encodeURIComponent(id)}${query}`, ledger);
       await settle();
       unmount();
     }
@@ -124,11 +134,11 @@ describe("every link leads to a recorded page", () => {
     const queue = [
       ...LIST_PAGES,
       ...OTHER_PAGES,
-      ...recordedIds("ExecutionDetail", "id").map((id) => `/executions/${id}`),
-      ...recordedIds("WorkQueueDetail", "id").map((id) => `/work-queue/${id}`),
-      ...recordedIds("DeadLetterDetail", "id").map((id) => `/dead-letters/${id}`),
-      ...recordedIds("ManifestDetail", "id").map((id) => `/manifests/${id}`),
-      ...recordedIds("ManifestGroupDetail", "id").map((id) => `/groups/${id}`),
+      ...recordedIds("ExecutionDetail", "id").map((id) => `/runs/${id}`),
+      ...recordedIds("WorkQueueDetail", "id").map((id) => `/runs/queued/${id}`),
+      ...recordedIds("DeadLetterDetail", "id").map((id) => `/runs/dead-letters/${id}`),
+      ...recordedIds("ManifestDetail", "id").map((id) => `/schedules/${id}`),
+      ...recordedIds("ManifestGroupDetail", "id").map((id) => `/schedules/groups/${id}`),
     ];
     const seen = new Set(queue);
     while (queue.length > 0) {
@@ -148,25 +158,24 @@ describe("every link leads to a recorded page", () => {
   }, 600_000);
 });
 
-describe("what the recordings do not hold yet", () => {
-  // Nothing in the demo leads to a read no recording answers: the page parts that need one are not
-  // offered (lib/answerable.ts) until the recorder records it.
-  test("the sidebar offers no State machines page and a run page draws no run graph", async () => {
-    if (!notOfferedYet("MachineInstances") && !notOfferedYet("RunGraph")) return;
+describe("the reads the console added", () => {
+  test("every read a page sends is recorded, so the demo holds none back", () => {
+    expect(NOT_RECORDED_YET).toEqual([]);
+  });
+
+  test("the sidebar offers the Machines page and a run page draws its run graph", async () => {
     const ledger = newLedger();
     const { container, unmount } = renderDemo("/", ledger);
     await settle();
-    expect(within(container).queryByRole("link", { name: "State machines" }) == null).toBe(
-      notOfferedYet("MachineInstances"),
-    );
+    expect(within(container).queryByRole("link", { name: "Machines" })).not.toBeNull();
     unmount();
     for (const id of recordedIds("ExecutionDetail", "id").slice(0, 10)) {
-      const page = renderDemo(`/executions/${id}`, ledger);
+      const page = renderDemo(`/runs/${id}`, ledger);
       await settle();
-      expect(within(page.container).queryByRole("region", { name: "Run graph" }) == null).toBe(notOfferedYet("RunGraph"));
+      expect(within(page.container).queryByRole("region", { name: "Run graph" })).not.toBeNull();
       page.unmount();
     }
-    expect(served(ledger, "missing")).toEqual([]);
+    expectAllRecorded(ledger);
   });
 });
 
@@ -200,20 +209,19 @@ describe("writes", () => {
 
   test("cancelling a queued entry on the page reads back cancelled", async () => {
     const ledger = newLedger();
-    const { container } = renderDemo("/work-queue", ledger);
+    const { container } = renderDemo("/runs/queued", ledger);
     await settle();
     const page = pageOf(container);
     const badges = () => within(page).queryAllByText("Cancelled", { selector: "span" }).length;
     const before = badges();
-    const original = window.confirm;
-    window.confirm = () => true;
+    setAutoConfirm(true);
     try {
       const cancel = within(page).getAllByRole("button", { name: /^Cancel$/ })[0];
       fireEvent.click(cancel);
       await settle();
       expect(badges()).toBe(before + 1);
     } finally {
-      window.confirm = original;
+      setAutoConfirm(null);
     }
     expectAllRecorded(ledger);
   });

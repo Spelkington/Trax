@@ -151,6 +151,16 @@ public class DataContext<TDbContext>(DbContextOptions<TDbContext> options)
     /// </summary>
     public DbSet<Effect.Models.Checkpoint.Checkpoint> Checkpoints { get; set; }
 
+    /// <summary>
+    /// Gets or sets the DbSet for the heartbeat rows each running host rewrites every 15 seconds.
+    /// </summary>
+    public DbSet<Effect.Models.HostHeartbeat.HostHeartbeat> HostHeartbeats { get; set; }
+
+    /// <summary>
+    /// Gets or sets the DbSet for the history of each state-machine instance, one row per snapshot write.
+    /// </summary>
+    public DbSet<Effect.Models.SnapshotTransition.SnapshotTransition> SnapshotTransitions { get; set; }
+
     #endregion
 
     /// <summary>
@@ -186,6 +196,8 @@ public class DataContext<TDbContext>(DbContextOptions<TDbContext> options)
         Models.SnapshotDraft.PersistentSnapshotDraft.OnModelCreating(modelBuilder);
         Models.EffectClaim.PersistentEffectClaim.OnModelCreating(modelBuilder);
         Models.Checkpoint.PersistentCheckpoint.OnModelCreating(modelBuilder);
+        Models.HostHeartbeat.PersistentHostHeartbeat.OnModelCreating(modelBuilder);
+        Models.SnapshotTransition.PersistentSnapshotTransition.OnModelCreating(modelBuilder);
     }
 
     /// <summary>

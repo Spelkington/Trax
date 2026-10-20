@@ -17,8 +17,10 @@ import { BatchTriggerNotice } from "../components/BatchTriggerNotice";
 import { useSelection } from "../lib/useSelection";
 import { toast } from "../lib/toast";
 import { Pager } from "../components/Pager";
-import { DagGraph } from "../components/DagGraph";
-import { computeDagLayout } from "../lib/dagLayout";
+import { Graph } from "../components/Graph";
+import { GROUP_GRAPH_LEGEND, groupGraph } from "../lib/groupGraph";
+import { SchedulesTabs } from "../components/schedules";
+import { useGroupGraphStatus } from "../lib/schedules";
 import { useKeyset } from "../lib/useKeyset";
 import { usePoll } from "../lib/poll";
 import { useRefetchOnChange } from "../lib/useRefetchOnChange";
@@ -30,6 +32,8 @@ import type {
   ManifestGroupSummary,
   PagedResult,
 } from "../types";
+import { confirmAction } from "../lib/confirm";
+import { TermHelp } from "../components/TermHelp";
 
 const PAGE_SIZE = 25;
 
@@ -64,7 +68,17 @@ export function ManifestGroupsPage() {
   // Both go through the operations service the Blazor page calls. "All" acts on every group, not
   // just this page, and leaves the selection alone; "selected" clears it.
   async function onSetAll(enabled: boolean) {
-    if (!confirm(`${enabled ? "Enable" : "Disable"} every manifest group?`)) return;
+    if (
+      !(await confirmAction({
+        title: enabled ? "Enable all groups" : "Disable all groups",
+        message: enabled
+          ? "Enable every manifest group? Their manifests start running on schedule again."
+          : "Disable every manifest group? No manifest in any group runs until a group is enabled again.",
+        danger: !enabled,
+        typeToConfirm: enabled ? undefined : "all",
+      }))
+    )
+      return;
     setBusy(true);
     const r = await setAllGroupsEnabled({ enabled });
     setBusy(false);
@@ -85,7 +99,13 @@ export function ManifestGroupsPage() {
   // the Blazor page's buttons do. A trigger counts manifests: a member that already had a queued
   // entry is counted apart from the ones queued, and a group that no longer exists is noted.
   async function onTriggerSelected() {
-    if (!confirm(`Trigger every manifest in ${selectedIds.length} group(s)?`)) return;
+    if (
+      !(await confirmAction({
+        title: "Queue groups",
+        message: `Queue every manifest in ${selectedIds.length} group(s) now?`,
+      }))
+    )
+      return;
     setBusy(true);
     setBatchReport(null);
     setBatchError(null);
@@ -93,7 +113,7 @@ export function ManifestGroupsPage() {
     setBusy(false);
     const res: BatchTriggerResponse | undefined = r.data?.operations?.triggerGroups;
     if (r.error || !res) {
-      setBatchError(r.error?.message ?? "The trigger did not answer.");
+      setBatchError(r.error?.message ?? "The queue request did not answer.");
       return;
     }
     const report = reportBatchTrigger(res);
@@ -106,9 +126,11 @@ export function ManifestGroupsPage() {
 
   async function onCancelSelected() {
     if (
-      !confirm(
-        `Request cancellation of every pending and running execution in ${selectedIds.length} group(s)?`,
-      )
+      !(await confirmAction({
+        title: "Cancel running work",
+        message: `Request cancellation of every pending and running run in ${selectedIds.length} group(s)?`,
+        danger: true,
+      }))
     )
       return;
     setBusy(true);
@@ -135,22 +157,16 @@ export function ManifestGroupsPage() {
   const [graphResult, reexecuteGraph] = useQuery<{
     operations: { manifestGroups: { dependencyGraph: ManifestGroupDependencyGraph } };
   }>({ query: GROUP_DEPENDENCY_GRAPH });
-  useRefetchOnChange("MANIFEST_GROUP", () =>
-    reexecuteGraph({ requestPolicy: "network-only" }),
-  );
   const graph = graphResult.data?.operations?.manifestGroups?.dependencyGraph;
-  const layout = useMemo(
-    () =>
-      computeDagLayout(
-        (graph?.nodes ?? []).map((n) => ({
-          id: n.id,
-          label: n.name,
-          isHighlighted: n.isHighlighted,
-        })),
-        (graph?.edges ?? []).map((e) => ({ fromId: e.fromId, toId: e.toId })),
-      ),
-    [graph],
-  );
+  // Each node is toned by whether its group is enabled, running or failing; the status moves
+  // with runs, so it refetches with the grid's poll as well as on a group change.
+  const status = useGroupGraphStatus(graph);
+  useRefetchOnChange("MANIFEST_GROUP", () => {
+    reexecuteGraph({ requestPolicy: "network-only" });
+    status.refetch();
+  });
+  usePoll(status.refetch);
+  const drawn = useMemo(() => groupGraph(graph, status.statuses), [graph, status.statuses]);
 
   // Fetch per-group stats for just the visible page, in one batched call (see the API notes on
   // why this is not folded into the list query: it is a heavier aggregation).
@@ -168,10 +184,12 @@ export function ManifestGroupsPage() {
 
   return (
     <div>
+      <SchedulesTabs />
       <div className="flex items-center justify-between mb-6 gap-4">
-        <h1 className="text-2xl font-bold text-fg">
-          Manifest groups
-        </h1>
+        <div className="flex items-center gap-2">
+        <h1 className="text-2xl font-bold text-fg">Manifest groups</h1>
+        <TermHelp term="manifestGroup" />
+      </div>
         <div className="flex items-center gap-2 ml-auto">
           <button
             onClick={() => onSetAll(true)}
@@ -218,7 +236,7 @@ export function ManifestGroupsPage() {
             disabled={busy}
             className="text-accent-fg font-medium hover:underline disabled:opacity-50"
           >
-            Trigger selected
+            Queue selected
           </button>
           <button
             onClick={() => onSetSelected(true)}
@@ -264,7 +282,7 @@ export function ManifestGroupsPage() {
               <th className="px-4 py-2 font-medium">Manifests</th>
               <th className="px-4 py-2 font-medium">Runs</th>
               <th className="px-4 py-2 font-medium">Failed</th>
-              <th className="px-4 py-2 font-medium">Max active jobs</th>
+              <th className="px-4 py-2 font-medium">Max active jobs in group</th>
               <th className="px-4 py-2 font-medium">Priority</th>
               <th className="px-4 py-2 font-medium">Enabled</th>
             </tr>
@@ -282,7 +300,7 @@ export function ManifestGroupsPage() {
                 </td>
                 <td className="px-4 py-2">
                   <Link
-                    to={`/groups/${g.id}`}
+                    to={`/schedules/groups/${g.id}`}
                     className="font-medium text-accent-fg hover:underline"
                   >
                     {g.name}
@@ -317,7 +335,15 @@ export function ManifestGroupsPage() {
             {page?.items.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-4 py-8 text-center text-muted">
-                  No groups.
+                  No groups.{" "}
+                  <a
+                    className="text-accent-fg hover:underline"
+                    href="https://traxsharp.net/docs/scheduler/dependent-trains"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Groups and dependencies
+                  </a>
                 </td>
               </tr>
             )}
@@ -334,15 +360,22 @@ export function ManifestGroupsPage() {
         onNext={next}
       />
 
-      {layout.nodes.length > 0 && (
+      {drawn.nodes.length > 0 && (
         <div className="mt-8 bg-surface rounded-lg border border-line p-5">
           <h2 className="text-sm font-semibold text-fg mb-1">
             Dependency graph
           </h2>
           <p className="text-xs text-muted mb-3">
-            Cross-group dependencies (parent → dependent). Click a group to open it.
+            A group runs after the groups with an arrow into it. Each is coloured by whether it is
+            enabled, has a run in progress, or its latest run failed. Click a group to open it.
           </p>
-          <DagGraph layout={layout} onNodeClick={(id) => navigate(`/groups/${id}`)} />
+          <Graph
+            nodes={drawn.nodes}
+            edges={drawn.edges}
+            ariaLabel="Dependency graph"
+            legend={GROUP_GRAPH_LEGEND}
+            onSelect={(id) => navigate(`/schedules/groups/${id}`)}
+          />
         </div>
       )}
     </div>

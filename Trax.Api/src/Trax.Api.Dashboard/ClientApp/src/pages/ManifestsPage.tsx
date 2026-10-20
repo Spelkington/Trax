@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery } from "urql";
-import { MANIFESTS } from "../graphql/queries";
+import { MANIFEST_SCHEDULES, MANIFESTS } from "../graphql/queries";
 import {
   DISABLE_MANIFEST,
   ENABLE_MANIFEST,
@@ -20,7 +20,15 @@ import { useKeyset } from "../lib/useKeyset";
 import { useSelection } from "../lib/useSelection";
 import { usePoll } from "../lib/poll";
 import { useRefetchOnChange } from "../lib/useRefetchOnChange";
-import type { ManifestSummary, PagedResult, ScheduleType } from "../types";
+import type { ManifestSchedule, ManifestSummary, PagedResult, ScheduleType } from "../types";
+import { useAnswers } from "../lib/answerable";
+import { useNow } from "../lib/useNow";
+import { NextRun, SchedulesTabs } from "../components/schedules";
+import { confirmAction } from "../lib/confirm";
+import { useUrlState } from "../lib/urlState";
+import { ApplyToAllMatching } from "../components/ApplyToAllMatching";
+import { TermHelp } from "../components/TermHelp";
+import { offersDecisions, useTrainsAskingDecisions } from "../lib/decisions";
 
 const PAGE_SIZE = 25;
 const SCHEDULES: (ScheduleType | "")[] = [
@@ -38,25 +46,40 @@ interface ManifestsData {
   operations: { manifests: PagedResult<ManifestSummary> };
 }
 
+interface SchedulesData {
+  operations: { manifests: { items: ManifestSchedule[] } };
+}
+
 export function ManifestsPage() {
   const { afterId, isFirstPage, next, prev, reset } = useKeyset();
-  const [enabled, setEnabled] = useState("");
-  const [scheduleType, setScheduleType] = useState<ScheduleType | "">("");
-  const [name, setName] = useState("");
-  // The same "Hide admin trains" preference the Executions grid and the Overview use: it leaves out
+  const [enabled, setEnabled] = useUrlState("enabled");
+  const [scheduleType, setScheduleType] = useUrlState<ScheduleType | "">("schedule");
+  const [name, setName] = useUrlState("name");
+  // The same "Hide admin trains" preference the Runs grid and the Overview use: it leaves out
   // the manifests of the scheduler's own trains, server side.
   const hideAdmin = useHideAdminTrains();
-  const [result, reexecute] = useQuery<ManifestsData>({
-    query: MANIFESTS,
-    variables: {
-      take: PAGE_SIZE,
-      afterId,
-      isEnabled: enabled === "" ? null : enabled === "true",
-      scheduleType: scheduleType || null,
-      nameContains: name || null,
-      hideAdminTrains: hideAdmin,
-    },
+  const variables = {
+    take: PAGE_SIZE,
+    afterId,
+    isEnabled: enabled === "" ? null : enabled === "true",
+    scheduleType: scheduleType || null,
+    nameContains: name || null,
+    hideAdminTrains: hideAdmin,
+  };
+  const [result, reexecute] = useQuery<ManifestsData>({ query: MANIFESTS, variables });
+  // The schedule in words and the next runs, read for the same page with the same filters and
+  // zipped to its rows by id. Left out where the client cannot answer it (the demo, until the
+  // recordings hold it); the row then shows the schedule from its type.
+  const schedulesAnswered = useAnswers("ManifestSchedules");
+  const [schedulesResult, reexecuteSchedules] = useQuery<SchedulesData>({
+    query: MANIFEST_SCHEDULES,
+    variables: { ...variables, count: 3 },
+    pause: !schedulesAnswered,
   });
+  const schedules = new Map(
+    (schedulesResult.data?.operations?.manifests?.items ?? []).map((s) => [s.id, s]),
+  );
+  const now = useNow(30_000);
   const [, trigger] = useMutation(TRIGGER_MANIFEST);
   const [, enable] = useMutation(ENABLE_MANIFEST);
   const [, disable] = useMutation(DISABLE_MANIFEST);
@@ -67,23 +90,35 @@ export function ManifestsPage() {
   const [batchReport, setBatchReport] = useState<BatchTriggerReport | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   const { selected, toggle, setMany, clear } = useSelection();
-  useRefetchOnChange("MANIFEST", () => reexecute({ requestPolicy: "network-only" }));
-  usePoll(() => reexecute({ requestPolicy: "network-only" }));
+  const refetchAll = () => {
+    reexecute({ requestPolicy: "network-only" });
+    if (schedulesAnswered) reexecuteSchedules({ requestPolicy: "network-only" });
+  };
+  useRefetchOnChange("MANIFEST", refetchAll);
+  usePoll(refetchAll);
 
   const page = result.data?.operations?.manifests;
   const rows = page?.items ?? [];
   const selectedIds = [...selected];
+  const askingDecisions = useTrainsAskingDecisions();
+  const selectedAsk = offersDecisions(askingDecisions, rows.filter((r) => selected.has(r.id)).map((r) => r.name));
   const allSelected = rows.length > 0 && rows.every((m) => selected.has(m.id));
-  const refetch = () => reexecute({ requestPolicy: "network-only" });
+  const refetch = refetchAll;
 
+  // One manifest's Queue, Disable or Enable from its row. The server answers success: false for a
+  // manifest it no longer has; that is said, as an accepted change is.
   async function run(
     action: typeof trigger,
+    field: "triggerManifest" | "enableManifest" | "disableManifest",
     externalId: string,
-    confirmMsg?: string,
+    confirm?: { title: string; message: string },
   ) {
-    if (confirmMsg && !confirm(confirmMsg)) return;
+    if (confirm && !(await confirmAction(confirm))) return;
     const r = await action({ externalId });
-    if (r.error) alert(r.error.message);
+    const res: OperationResponse | undefined = r.data?.operations?.[field];
+    if (r.error) toast(r.error.message, "error");
+    else if (res?.success) toast(res.message || "Done.", "success");
+    else toast(res?.message ?? "Nothing changed.", "error");
     refetch();
   }
 
@@ -111,9 +146,9 @@ export function ManifestsPage() {
   // can be changed and sent again; an accepted batch clears it and shows each id it noted.
   async function triggerSelected(askAfresh: boolean) {
     const what = askAfresh
-      ? `Trigger ${selectedIds.length} manifest(s), asking afresh? A queued retry each releases asks the model again instead of replaying the failed run's decisions.`
-      : `Trigger ${selectedIds.length} manifest(s)?`;
-    if (!confirm(what)) return;
+      ? `Queue ${selectedIds.length} manifest(s), asking afresh? A queued retry each releases asks its decider again instead of replaying the failed run's decisions.`
+      : `Queue ${selectedIds.length} manifest(s) now?`;
+    if (!(await confirmAction({ title: askAfresh ? "Queue, asking afresh" : "Queue manifests", message: what }))) return;
     setBusy(true);
     setBatchReport(null);
     setBatchError(null);
@@ -121,7 +156,7 @@ export function ManifestsPage() {
     setBusy(false);
     const res: BatchTriggerResponse | undefined = r.data?.operations?.triggerManifests;
     if (r.error || !res) {
-      setBatchError(r.error?.message ?? "The trigger did not answer.");
+      setBatchError(r.error?.message ?? "The queue request did not answer.");
       return;
     }
     const report = reportBatchTrigger(res);
@@ -134,8 +169,12 @@ export function ManifestsPage() {
 
   return (
     <div>
+      <SchedulesTabs />
       <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
+        <div className="flex items-center gap-2">
         <h1 className="text-2xl font-bold text-fg">Manifests</h1>
+        <TermHelp term="manifest" />
+      </div>
         <div className="flex gap-2">
           <input
             value={name}
@@ -188,7 +227,7 @@ export function ManifestsPage() {
                 reset();
               }}
             />
-            Hide admin trains
+            Hide scheduler trains
           </label>
         </div>
       </div>
@@ -211,16 +250,18 @@ export function ManifestsPage() {
             onClick={() => triggerSelected(false)}
             className="text-accent-fg font-medium hover:underline disabled:opacity-50"
           >
-            Trigger selected
+            Queue selected
           </button>
-          <button
-            disabled={busy}
-            title="Trigger; a queued retry this releases asks the model afresh instead of replaying the failed run's decisions."
-            onClick={() => triggerSelected(true)}
-            className="text-accent-fg font-medium hover:underline disabled:opacity-50"
-          >
-            Trigger selected, ask afresh
-          </button>
+          {selectedAsk && (
+            <button
+              disabled={busy}
+              title="Queue; a queued retry this releases asks its decider afresh instead of replaying the failed run's decisions."
+              onClick={() => triggerSelected(true)}
+              className="text-accent-fg font-medium hover:underline disabled:opacity-50"
+            >
+              Queue selected, ask afresh
+            </button>
+          )}
           <button
             disabled={busy}
             onClick={() =>
@@ -239,34 +280,55 @@ export function ManifestsPage() {
           >
             Disable selected
           </button>
-          <button
-            disabled={busy}
-            title="Retries of the selected manifests replay the decisions the failed run recorded."
-            onClick={() =>
-              bulkSet(
-                "Retries replay decisions.",
-                () => setReplayMany({ ids: selectedIds, replay: true }),
-                "setManifestsReplayDecisionsOnRetry",
-              )
-            }
-            className="text-accent-fg font-medium hover:underline disabled:opacity-50"
-          >
-            Replay on retry
-          </button>
-          <button
-            disabled={busy}
-            title="Retries of the selected manifests ask the model afresh instead of replaying the failed run's decisions."
-            onClick={() =>
-              bulkSet(
-                "Retries ask afresh.",
-                () => setReplayMany({ ids: selectedIds, replay: false }),
-                "setManifestsReplayDecisionsOnRetry",
-              )
-            }
-            className="text-accent-fg font-medium hover:underline disabled:opacity-50"
-          >
-            Ask afresh on retry
-          </button>
+          <ApplyToAllMatching
+            total={page?.totalCount}
+            // The list read's filter, as its variables send it.
+            filter={{
+              manifests: {
+                isEnabled: enabled === "" ? null : enabled === "true",
+                scheduleType: scheduleType || null,
+                nameContains: name || null,
+                hideAdminTrains: hideAdmin,
+              },
+            }}
+            actions={[
+              { kind: "TRIGGER", explain: "A run of each is queued now.", danger: false },
+              { kind: "ENABLE", explain: "Each runs on its schedule again.", danger: false },
+              { kind: "DISABLE", explain: "None runs on its schedule until it is enabled." },
+            ]}
+          />
+          {selectedAsk && (
+            <button
+              disabled={busy}
+              title="Retries of the selected manifests replay the decisions the failed run recorded."
+              onClick={() =>
+                bulkSet(
+                  "Retries replay decisions.",
+                  () => setReplayMany({ ids: selectedIds, replay: true }),
+                  "setManifestsReplayDecisionsOnRetry",
+                )
+              }
+              className="text-accent-fg font-medium hover:underline disabled:opacity-50"
+            >
+              Replay on retry
+            </button>
+          )}
+          {selectedAsk && (
+            <button
+              disabled={busy}
+              title="Retries of the selected manifests ask the model afresh instead of replaying the failed run's decisions."
+              onClick={() =>
+                bulkSet(
+                  "Retries ask afresh.",
+                  () => setReplayMany({ ids: selectedIds, replay: false }),
+                  "setManifestsReplayDecisionsOnRetry",
+                )
+              }
+              className="text-accent-fg font-medium hover:underline disabled:opacity-50"
+            >
+              Ask afresh on retry
+            </button>
+          )}
           <button
             onClick={clear}
             className="ml-auto text-muted hover:underline"
@@ -291,6 +353,7 @@ export function ManifestsPage() {
               </th>
               <th className="px-4 py-2 font-medium">Manifest</th>
               <th className="px-4 py-2 font-medium">Schedule</th>
+              <th className="px-4 py-2 font-medium">Next run</th>
               <th className="px-4 py-2 font-medium">Enabled</th>
               <th className="px-4 py-2 font-medium">Retries</th>
               <th className="px-4 py-2 font-medium">Last success</th>
@@ -310,7 +373,7 @@ export function ManifestsPage() {
                 </td>
                 <td className="px-4 py-2">
                   <Link
-                    to={`/manifests/${m.id}`}
+                    to={`/schedules/${m.id}`}
                     className="font-medium text-accent-fg hover:underline"
                     title={m.name}
                   >
@@ -318,7 +381,12 @@ export function ManifestsPage() {
                   </Link>
                   <span className="block text-xs text-muted">{m.externalId}</span>
                 </td>
-                <td className="px-4 py-2 text-fg-2">{schedule(m)}</td>
+                <td className="px-4 py-2 text-fg-2" title={m.cronExpression ?? undefined}>
+                  {schedules.get(m.id)?.scheduleText ?? schedule(m)}
+                </td>
+                <td className="px-4 py-2 whitespace-nowrap">
+                  <NextRun runs={schedules.get(m.id)?.nextRuns} now={now} />
+                </td>
                 <td className="px-4 py-2">
                   <span
                     className={`text-xs px-2 py-0.5 rounded-full ${
@@ -344,22 +412,25 @@ export function ManifestsPage() {
                 <td className="px-4 py-2 text-right whitespace-nowrap">
                   <button
                     onClick={() =>
-                      run(trigger, m.externalId, `Trigger "${shortName(m.name)}" now?`)
+                      run(trigger, "triggerManifest", m.externalId, {
+                        title: "Queue manifest",
+                        message: `Queue "${shortName(m.name)}" now?`,
+                      })
                     }
                     className="text-accent-fg hover:underline mr-3"
                   >
-                    Trigger
+                    Queue
                   </button>
                   {m.isEnabled ? (
                     <button
-                      onClick={() => run(disable, m.externalId)}
+                      onClick={() => run(disable, "disableManifest", m.externalId)}
                       className="text-fg-2 hover:underline"
                     >
                       Disable
                     </button>
                   ) : (
                     <button
-                      onClick={() => run(enable, m.externalId)}
+                      onClick={() => run(enable, "enableManifest", m.externalId)}
                       className="text-ok-fg hover:underline"
                     >
                       Enable
@@ -370,8 +441,16 @@ export function ManifestsPage() {
             ))}
             {page?.items.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-muted">
-                  No manifests.
+                <td colSpan={8} className="px-4 py-8 text-center text-muted">
+                  No manifests.{" "}
+                  <a
+                    className="text-accent-fg hover:underline"
+                    href="https://traxsharp.net/docs/scheduler/setup"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Schedule a train
+                  </a>
                 </td>
               </tr>
             )}

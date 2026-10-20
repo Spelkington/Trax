@@ -55,6 +55,59 @@ export const OVERVIEW = gql`
   }
 `;
 
+// What needs attention, the Overview's lead: the scheduler switches, dead letters awaiting intervention by train
+// and reason, trains failing more this hour than this week, stuck instances by machine and state, the due queue and
+// hosts that stopped beating. Each entry's link is the console path and query that lists it. Lists hold at most 50.
+export const ATTENTION = gql`
+  query Attention {
+    operations {
+      attention {
+        asOf
+        scheduler {
+          manifestManagerEnabled
+          jobDispatcherEnabled
+          paused
+          link
+        }
+        deadLetters {
+          trainName
+          reason
+          count
+          oldestDeadLetteredAt
+          link
+        }
+        failingTrains {
+          trainName
+          failedLastHour
+          finishedLastHour
+          lastHourFailureRate
+          baselineFailureRate
+          link
+        }
+        stuckInstances {
+          machine
+          state
+          count
+          link
+        }
+        queue {
+          queued
+          oldestQueuedAt
+          oldestAgeSeconds
+          link
+        }
+        offlineHosts {
+          instanceId
+          hostName
+          lastHeartbeatAt
+          runsDispatcher
+          link
+        }
+      }
+    }
+  }
+`;
+
 // Registered trains. In-memory discovery, so it stays fast regardless of table size.
 export const TRAINS = gql`
   query Trains($hideAdmin: Boolean!) {
@@ -115,6 +168,7 @@ export const WORK_QUEUE = gql`
             priority
             dispatchAttempts
             manifestId
+            metadataId
             subjectKey
             confirmedAt
             replayDecisionsOf
@@ -138,6 +192,36 @@ export const DEAD_LETTERS = gql`
             id
             manifestId
             manifestName
+            manifestExternalId
+            status
+            deadLetteredAt
+            reason
+            retryCountAtDeadLetter
+            resolvedAt
+            resolutionNote
+          }
+          totalCount
+          isEstimatedCount
+          nextCursor
+        }
+      }
+    }
+  }
+`;
+
+// The newest dead letters (the page asks for the largest page the API serves) for the Dead letters
+// view to group by train and reason. A separate document from DeadLetters so the demo, whose
+// recordings hold only 25-row pages, can leave the grouping out (demo/harness.tsx).
+export const DEAD_LETTER_GROUPS = gql`
+  query DeadLetterGroups($take: Int!, $status: DeadLetterStatus, $manifestId: Long) {
+    operations {
+      deadLetters {
+        deadLetters(take: $take, status: $status, manifestId: $manifestId) {
+          items {
+            id
+            manifestId
+            manifestName
+            manifestExternalId
             status
             deadLetteredAt
             reason
@@ -191,6 +275,33 @@ export const LOGS = gql`
           isEstimatedCount
           isCountCapped
           nextCursor
+        }
+      }
+    }
+  }
+`;
+
+// Runs over time for one train (name), manifest or group (id): per bucket, the runs that
+// completed, failed or were cancelled and the p50/p95 duration of the completed ones. Buckets are
+// a minute (LAST_HOUR), 15 minutes (LAST24_HOURS) or an hour (LAST7_DAYS); LAST30_DAYS is refused.
+export const METRIC_SERIES = gql`
+  query MetricSeries($scope: MetricSeriesScope!, $range: MetricSeriesRange!, $id: Long, $name: String) {
+    operations {
+      metrics {
+        series(scope: $scope, range: $range, id: $id, name: $name) {
+          scope
+          range
+          from
+          to
+          bucketSeconds
+          buckets {
+            start
+            completed
+            failed
+            cancelled
+            p50DurationMs
+            p95DurationMs
+          }
         }
       }
     }
@@ -274,6 +385,33 @@ export const EXECUTION_DETAIL = gql`
         replayAbandoned
         resumeFrom
         resumeAt
+      }
+    }
+  }
+`;
+
+// What a run is linked to, so the run page can go to what started it and what it came from: the
+// machine instance whose invoking state queued it (never whose a user's draft is; rowId is the row
+// machineInstance takes while the instance still waits on the run), the work queue entry it ran
+// from, the dead letter it retries, and the runs around it.
+export const RUN_LINKS = gql`
+  query RunLinks($id: Long!) {
+    operations {
+      executionDetail(id: $id) {
+        id
+        manifestId
+        parentId
+        childCount
+        replayDecisionsOf
+        resumeFrom
+        workQueueEntryId
+        deadLetterId
+        invokedBy {
+          machine
+          instanceId
+          ownerKind
+          rowId
+        }
       }
     }
   }
@@ -403,6 +541,55 @@ export const MANIFEST_DETAIL = gql`
   }
 `;
 
+// When each manifest of a page runs next, read from the manifest manager's own due-ness check,
+// and its schedule in plain words ("Daily at 02:00 UTC"). nextRuns is empty for a manifest that
+// has no time (scheduleText says what starts it) or will not run; count is at most 10. It takes
+// the filters MANIFESTS takes, so the two page alike and the list zips them by id.
+export const MANIFEST_SCHEDULES = gql`
+  query ManifestSchedules(
+    $take: Int!
+    $afterId: Long
+    $isEnabled: Boolean
+    $scheduleType: ScheduleType
+    $nameContains: String
+    $manifestGroupId: Long
+    $hideAdminTrains: Boolean! = false
+    $count: Int! = 5
+  ) {
+    operations {
+      manifests(
+        take: $take
+        afterId: $afterId
+        isEnabled: $isEnabled
+        scheduleType: $scheduleType
+        nameContains: $nameContains
+        manifestGroupId: $manifestGroupId
+        hideAdminTrains: $hideAdminTrains
+      ) {
+        items {
+          id
+          scheduleText
+          nextRuns(count: $count)
+        }
+        nextCursor
+      }
+    }
+  }
+`;
+
+// One manifest's upcoming runs and its schedule in words, for its detail page.
+export const MANIFEST_SCHEDULE = gql`
+  query ManifestSchedule($id: Long!, $count: Int! = 5) {
+    operations {
+      manifestDetail(id: $id) {
+        id
+        scheduleText
+        nextRuns(count: $count)
+      }
+    }
+  }
+`;
+
 // Manifest groups, newest first.
 export const MANIFEST_GROUPS = gql`
   query ManifestGroups($take: Int!, $afterId: Long, $nameContains: String) {
@@ -444,6 +631,7 @@ export const MANIFEST_GROUP_DETAIL = gql`
             id
             name
             isHighlighted
+            isEnabled
           }
           edges {
             fromId
@@ -466,6 +654,7 @@ export const GROUP_DEPENDENCY_GRAPH = gql`
             id
             name
             isHighlighted
+            isEnabled
           }
           edges {
             fromId
@@ -578,7 +767,8 @@ export const ADMIN_TRAIN_NAMES = gql`
   }
 `;
 
-// Processes that have run trains, rolled up by host instance. Backs the cluster page.
+// Host processes from their heartbeat rows, online when beaten in the last 45 seconds. Backs the
+// Hosts page.
 export const HOSTS = gql`
   query Hosts {
     operations {
@@ -586,9 +776,32 @@ export const HOSTS = gql`
         instanceId
         name
         environment
-        lastSeen
-        totalExecutions
+        traxVersion
+        startedAt
+        lastHeartbeat
+        online
+        runsDispatcher
+        runsManifestManager
+        workerSlots
+        workerSlotsInUse
         currentlyRunning
+      }
+    }
+  }
+`;
+
+// The process serving the dashboard: uptime, memory and CPU. Backs the Hosts page's panel for this
+// host; the other hosts report only their heartbeat.
+export const SERVER_PROCESS = gql`
+  query ServerProcess {
+    operations {
+      metrics {
+        server {
+          uptimeSeconds
+          workingSetBytes
+          gcHeapBytes
+        }
+        serverCpuPercent
       }
     }
   }
@@ -664,6 +877,22 @@ export const MANIFEST_GROUP_STATS = gql`
           failed
           inProgress
           lastRun
+        }
+      }
+    }
+  }
+`;
+
+// What a dependency graph's nodes are toned by: whether each group has a run in progress, and
+// whether its latest ended run failed. Its own read, so the list's stats stay keyed by the page.
+export const GROUP_GRAPH_STATUS = gql`
+  query GroupGraphStatus($groupIds: [Long!]!) {
+    operations {
+      manifestGroups {
+        stats(groupIds: $groupIds) {
+          groupId
+          inProgress
+          lastEndedRunFailed
         }
       }
     }
@@ -872,15 +1101,31 @@ export const PERSISTED_OPERATION_DETAIL = gql`
 const RUN_GRAPH_NODE = `
   id
   kind
+  junction
+  in
+  out
   opaque
   replayed
   checkpointed
   canResume
   state
   steps {
+    position
+    kind
+    name
+    nameWithheld
     state
+    startedAt
+    durationMs
+    attempt
     failureClass
     failureException
+    questionKey
+    answer
+    answerWithheld
+    confidence
+    decider
+    replayed
   }
 `;
 
@@ -901,6 +1146,7 @@ export const RUN_GRAPH = gql`
       runGraph(metadataId: $metadataId) {
         metadataId
         hasGraph
+        chainChanged
         moreSteps
         canResume
         unmatchedSteps {
@@ -923,8 +1169,113 @@ export const RUN_GRAPH = gql`
   }
 `;
 
+// Each train's declared chain, drawn the way runGraph draws a run of it but with no run (every node
+// NOT_REACHED, metadataId 0), and whether it asks a decider, so the train page can show what a train
+// does before it has run and offer Ask Afresh only where a run has decisions to ask again.
+// Which trains ask a decider, so Ask afresh and replay-on-retry show only where they mean something.
+export const TRAINS_ASKING_DECISIONS = gql`
+  query TrainsAskingDecisions {
+    operations {
+      trains(hideAdminTrains: false) {
+        fullName
+        asksDecisions
+      }
+    }
+  }
+`;
+
+export const TRAIN_CHAINS = gql`
+  query TrainChains($hideAdmin: Boolean!) {
+    operations {
+      trains(hideAdminTrains: $hideAdmin) {
+        fullName
+        asksDecisions
+        chain {
+          train
+          hasGraph
+          allNodes {
+            id
+            kind
+            junction
+            opaque
+            state
+            parentId
+            track
+            depth
+            tracks {
+              ${RUN_GRAPH_TRACK}
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// What an id, key or name names, for the console's search: exact matches only, at most 10 of each
+// kind. kind and id say which page opens; an instance carries its machine, owner kind and rowId (the
+// key machineInstance takes for a user's draft), never whose a draft is.
+export const LOOKUP = gql`
+  query Lookup($text: String!) {
+    operations {
+      lookup(text: $text) {
+        kind
+        id
+        label
+        matchedOn
+        machine
+        ownerKind
+        rowId
+      }
+    }
+  }
+`;
+
 // ── State machines ─────────────────────────────────────────────────────────
 // Operators see instances read-only and never their context: none of these selects it.
+
+// Every machine the host registers, with or without instances, and its graph as `trax machine show`
+// draws it: states, transitions (what takes each: a command, a timer or an outcome) and timers.
+export const MACHINES = gql`
+  query Machines {
+    operations {
+      machines {
+        name
+        version
+        systemOwned
+        schemaHash
+        initialState
+        graphUnavailableReason
+        states {
+          name
+          isInitial
+          isFinal
+          isCommitted
+          invokesTrain
+          spawnsMachine
+        }
+        transitions {
+          from
+          command
+          to
+          kind
+          guard
+          effect
+          after
+        }
+        timers {
+          state
+          command
+          target
+          after
+          field
+          min
+          max
+        }
+      }
+    }
+  }
+`;
 
 // How many instances each machine has in each state, by owner kind. Exact, where the list's total
 // stops at 10,000.
@@ -965,7 +1316,55 @@ export const MACHINE_INSTANCES = gql`
   }
 `;
 
-// One instance with the runs it invoked (newest first, at most 50). A user's draft is named by its
+// What says an instance needs attention: its timer's due time and whether it is overdue, the run
+// it waits on and where that run is, and whether it is stuck (overdue, or waiting on a run that
+// failed or was cancelled). inStateSince is when the instance last changed until a transition log
+// exists: label it "last changed". stuck: true lists only the stuck ones.
+export const MACHINE_INSTANCES_ATTENTION = gql`
+  query MachineInstancesAttention($machine: String, $state: String, $ownerKind: SnapshotOwnerKind, $stuck: Boolean, $skip: Int!, $take: Int!) {
+    operations {
+      machineInstances(machine: $machine, state: $state, ownerKind: $ownerKind, stuck: $stuck, skip: $skip, take: $take) {
+        items {
+          machine
+          ownerKind
+          id
+          rowId
+          state
+          updatedAt
+          inStateSince
+          dueAt
+          overdue
+          stuck
+          waitingOn {
+            executionId
+            trainState
+            workQueueEntryId
+          }
+        }
+        totalCount
+        isCountCapped
+      }
+    }
+  }
+`;
+
+// The counts by state with how many in each are stuck, for the diagram's per-state badges.
+export const MACHINE_INSTANCE_STUCK_COUNTS = gql`
+  query MachineInstanceStuckCounts($machine: String) {
+    operations {
+      machineInstanceCounts(machine: $machine) {
+        machine
+        state
+        ownerKind
+        count
+        stuck
+      }
+    }
+  }
+`;
+
+// One instance with the runs it invoked (newest first, at most 50) and what says it needs attention
+// (as MACHINE_INSTANCES_ATTENTION reads it). A user's draft is named by its
 // rowId too, because several users can each hold a draft under one id.
 export const MACHINE_INSTANCE = gql`
   query MachineInstance($machine: String!, $ownerKind: SnapshotOwnerKind!, $id: UUID!, $rowId: Long) {
@@ -982,6 +1381,15 @@ export const MACHINE_INSTANCE = gql`
         hasLiveInvokedRun
         queuedInvokedRunEntryId
         isInvokedRunsCapped
+        inStateSince
+        dueAt
+        overdue
+        stuck
+        waitingOn {
+          executionId
+          trainState
+          workQueueEntryId
+        }
         invokedRuns {
           id
           externalId
@@ -992,6 +1400,126 @@ export const MACHINE_INSTANCE = gql`
           failureClass
           cancellationRequested
           isLive
+        }
+      }
+    }
+  }
+`;
+
+// The bulk operations this node knows, newest first; each read on the node that started it.
+export const BULK_OPERATIONS = gql`
+  query BulkOperations {
+    operations {
+      bulkOperations {
+        id
+        kind
+        status
+        actor
+        askAfresh
+        startedAt
+        finishedAt
+        total
+        done
+        failed
+        message
+      }
+    }
+  }
+`;
+
+// One bulk operation with its filter and what did not take; null once this node no longer knows it.
+export const BULK_OPERATION = gql`
+  query BulkOperation($id: UUID!, $failuresAfter: Long, $failuresTake: Int! = 100) {
+    operations {
+      bulkOperation(id: $id) {
+        id
+        kind
+        status
+        actor
+        askAfresh
+        startedAt
+        finishedAt
+        total
+        done
+        failed
+        message
+        filter {
+          executions {
+            trainState
+            trainName
+            startedAfter
+            startedBefore
+            manifestId
+            manifestGroupId
+            hideAdminTrains
+            failureClass
+            externalId
+            parentId
+            hostName
+            failureReasonContains
+            failureJunction
+          }
+          deadLetters {
+            status
+            manifestId
+          }
+          manifests {
+            isEnabled
+            scheduleType
+            nameContains
+            manifestGroupId
+            hideAdminTrains
+          }
+        }
+        failureReasons {
+          reason
+          count
+        }
+        failures(take: $failuresTake, afterId: $failuresAfter) {
+          id
+          reason
+        }
+      }
+    }
+  }
+`;
+
+// One instance's history, newest first, paged by revision: the instance page's History panel.
+export const MACHINE_INSTANCE_TRANSITIONS = gql`
+  query MachineInstanceTransitions(
+    $machine: String!
+    $ownerKind: SnapshotOwnerKind!
+    $id: UUID!
+    $rowId: Long
+    $first: Int!
+    $after: Long
+  ) {
+    operations {
+      machineInstance(machine: $machine, ownerKind: $ownerKind, id: $id, rowId: $rowId) {
+        rowId
+        transitions(first: $first, after: $after) {
+          nextCursor
+          items {
+            revision
+            kind
+            trigger
+            actor
+            fromState
+            toState
+            at
+            previousAt
+            startedRun {
+              executionId
+              trainState
+              workQueueEntryId
+            }
+            startedChild {
+              machine
+              ownerKind
+              id
+              rowId
+            }
+          }
         }
       }
     }

@@ -157,6 +157,8 @@ public static class ServiceExtensions
                             o.MapEnum<JunctionRunKind>("junction_run_kind", "trax");
                             o.MapEnum<JunctionRunState>("junction_run_state", "trax");
                             o.MapEnum<SnapshotOwnerKind>("snapshot_owner_kind", "trax");
+                            o.MapEnum<SnapshotTransitionKind>("snapshot_transition_kind", "trax");
+                            o.MapEnum<SnapshotTransitionActor>("snapshot_transition_actor", "trax");
                         }
                     )
                     .UseLoggerFactory(new NullLoggerFactory())
@@ -180,6 +182,11 @@ public static class ServiceExtensions
             Trax.Effect.Services.Checkpoints.ICheckpointRows,
             Trax.Effect.Data.Checkpoints.CheckpointRows
         >();
+
+        // The row this host rewrites every 15 seconds, so an idle host can be told from a dead one.
+        Trax.Effect.Data.Services.HostHeartbeats.HostHeartbeatService.Register(
+            configurationBuilder.ServiceCollection
+        );
 
         // Register the SQL dialect for provider-specific raw SQL
         configurationBuilder.ServiceCollection.AddSingleton<ISqlDialect, PostgresSqlDialect>();

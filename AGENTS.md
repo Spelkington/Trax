@@ -42,8 +42,7 @@ Trax.Core/              Core utilities, the chain, the guard engines (Trax.Core.
 Trax.Effect/            Effect system, data providers, state machine
 Trax.Mediator/          Mediator pattern, train bus, train authorization
 Trax.Scheduler/         Job scheduling, manifests, remote runners
-Trax.Api/               GraphQL API layer, and the React operations dashboard it ships
-Trax.Dashboard/         Blazor Server dashboard UI
+Trax.Api/               GraphQL API layer, and the React operations console it ships (Trax.Docs/adr/0055)
 Trax.Cli/               The `trax` tool
 Trax.Samples/           Sample applications and the dotnet new templates
 Trax.Api.StateMachine/  @traxsharp/state-machine, the TypeScript twin of the state-machine engine
@@ -61,8 +60,8 @@ Each folder may reference only the folders before it. Trax.Cli and Trax.Api are 
 Trax.Scheduler and neither may reference the other:
 
 ```
-Trax.Core → Trax.Effect → Trax.Mediator → Trax.Scheduler ─┬─→ Trax.Api → Trax.Dashboard ─┐
-                                                          └─→ Trax.Cli ──────────────────┴─→ Trax.Samples
+Trax.Core → Trax.Effect → Trax.Mediator → Trax.Scheduler ─┬─→ Trax.Api ─┐
+                                                          └─→ Trax.Cli ─┴─→ Trax.Samples
 ```
 
 A Trax package is always a `ProjectReference` to its csproj, never a `PackageReference`, so every
@@ -93,7 +92,7 @@ title, the body below it. A security change or an open hotspot uses GitHub's `> 
 | 🟩 | Trains (`trains`) | `Train` (Core), `ServiceTrain` (Effect), junctions, chains, Memory, decisions, `Parallel` |
 | 🟪 | Machines (`machines`) | `Trax.Effect.StateMachine*` and `@traxsharp/state-machine`, its TypeScript twin |
 | 🟧 | Dispatch (`dispatch`) | Mediator (train bus, authorization), Scheduler (jobs, manifests, recovery), remote runners, Lambda |
-| 🟦 | Surface (`surface`) | Api (GraphQL, auth, persisted operations, generated clients) and Dashboard, which mirrors it action for action |
+| 🟦 | Surface (`surface`) | Api (GraphQL, auth, persisted operations, generated clients, the React operations console) |
 | ⬛ | Tooling (`tooling`) | CLI, analyzers, architecture and ADR guards, CI, release, docs |
 | 🟥 | Security (`security`) | Not a layer: a flag on anything that changes authentication, authorization or exposure |
 
@@ -168,7 +167,10 @@ Cognito key-rotation tests (401 instead of 200).
 change can affect: a folder runs when it or anything upstream of it changed, and a change outside
 every folder runs everything. Each .NET folder then gets the same steps (locked restore, lock and
 deprecation checks, build, pack with package validation, tests, the ADR guard), with the services
-and databases its entry in `.github/ci/packages.json` names. **`CI result` is the one required
+and databases its entry in `.github/ci/packages.json` names. A slow test project can be carved
+out of its folder's job into one of its own, beside it: a `suites` entry there names it, the
+folders it runs for and its paths, and the folder's row leaves its tests out with a `--filter`
+(the console's browser tests, `console-browser`, are one). **`CI result` is the one required
 check.**
 
 ## Releases

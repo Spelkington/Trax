@@ -75,6 +75,7 @@ internal static class RunGraphs
                 m.TrainState,
                 m.InvokingMachine,
                 m.ResumeFrom,
+                m.ChainHash,
             })
             .FirstOrDefaultAsync(cancellationToken);
 
@@ -103,7 +104,7 @@ internal static class RunGraphs
             )
             : null;
 
-        return Match(
+        var drawn = Match(
             metadataId,
             run.Name,
             graph,
@@ -113,7 +114,66 @@ internal static class RunGraphs
             Resumable(run.TrainState, run.InvokingMachine),
             Ended(run.TrainState)
         );
+
+        return drawn with
+        {
+            ChainChanged = ChainChanged(run.ChainHash, graph),
+        };
     }
+
+    /// <summary>
+    /// True when a run that recorded <paramref name="recorded"/> as its chain's hash is drawn on
+    /// <paramref name="graph"/>, a chain with another hash. False when either is missing: a run
+    /// with no hash has nothing to compare, and with no graph nothing is drawn.
+    /// </summary>
+    /// <param name="recorded">The hash the run recorded when it started, or null.</param>
+    /// <param name="graph">The train's graph now, or null.</param>
+    public static bool ChainChanged(string? recorded, ChainGraph? graph) =>
+        recorded is not null
+        && graph is not null
+        && !string.Equals(recorded, graph.Hash, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The declared chain of the registered train named <paramref name="train"/>, drawn as
+    /// <see cref="ReadAsync(IDataContext, ITrainChainGraphs, long, CancellationToken)"/> draws a
+    /// run of it, with no run: the same nodes, every one <see cref="RunNodeState.NotReached"/>,
+    /// no steps, and a <see cref="RunGraph.MetadataId"/> of 0. The read behind
+    /// <c>operations.trains { chain }</c>, so a train's page can show what it does before it has
+    /// run. <see cref="RunGraph.HasGraph"/> is false when the host has no graph for it.
+    /// </summary>
+    /// <param name="graphs">The registered trains' graphs, or null when the host has none.</param>
+    /// <param name="train">The train's canonical name.</param>
+    public static RunGraph Declared(ITrainChainGraphs? graphs, string train)
+    {
+        ArgumentNullException.ThrowIfNull(train);
+
+        var drawn = Match(0, train, graphs?.Find(train), []);
+        return drawn with { Nodes = drawn.Nodes.Select(Unreached).ToList() };
+
+        static RunGraphNode Unreached(RunGraphNode node) =>
+            node with
+            {
+                State = RunNodeState.NotReached,
+                Tracks = node
+                    .Tracks.Select(t => t with { Nodes = t.Nodes.Select(Unreached).ToList() })
+                    .ToList(),
+            };
+    }
+
+    /// <summary>
+    /// True when the registered train named <paramref name="train"/> declares a step that asks a
+    /// decider and records the decision: a <c>Decide</c>, or a <c>Switch</c>, <c>Gate</c> or
+    /// <c>Scale</c> that asks its own question, which declares a <c>Decide</c> before it. Only such
+    /// a train's runs have decisions a requeue can replay or ask afresh. False when the host has
+    /// no graph for it.
+    /// </summary>
+    /// <param name="graphs">The registered trains' graphs, or null when the host has none.</param>
+    /// <param name="train">The train's canonical name.</param>
+    public static bool AsksDecisions(ITrainChainGraphs? graphs, string train) =>
+        graphs?.Find(train) is { } graph && AnyDecide(graph.Nodes);
+
+    private static bool AnyDecide(IReadOnlyList<ChainGraphNode> nodes) =>
+        nodes.Any(n => n.Kind == ChainStepKind.Decide || n.Tracks.Any(t => AnyDecide(t.Nodes)));
 
     /// <summary>
     /// True when a run in <paramref name="state"/> has ended: it completed, failed or was

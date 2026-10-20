@@ -279,6 +279,214 @@ public class MachineInstanceStressTests : StressTestSetup
                 )
         ).Items.Single();
 
+    // A history longer than any instance builds in practice, on one instance, for the history reads to page through.
+    private const int DeepHistory = 100_000;
+
+    private const string HistoryFields =
+        "nextCursor items { revision kind trigger actor fromState toState at previousAt "
+        + "startedRun { executionId trainState workQueueEntryId } startedChild { machine id rowId } }";
+
+    private static string HistoryDocument(MachineInstanceRecord instance, string arguments) =>
+        "{ operations { machineInstance(machine: \""
+        + instance.Machine
+        + "\", ownerKind: SYSTEM, id: \""
+        + instance.Id
+        + "\") { transitions("
+        + arguments
+        + ") { "
+        + HistoryFields
+        + " } } } }";
+
+    // A system instance of the system machine that the seed gave a history, or one it did not.
+    private async Task<MachineInstanceRecord> SystemInstanceAsync(bool withHistory)
+    {
+        var id = await ScalarAsync<string>(
+            "SELECT d.id::text FROM trax.snapshot_draft d "
+                + $"WHERE d.machine = '{SystemMachine}' AND d.owner_kind = 'system' AND "
+                + (withHistory ? "" : "NOT ")
+                + "EXISTS (SELECT 1 FROM trax.snapshot_transition t WHERE t.draft_row_id = d.row_id) "
+                + "LIMIT 1"
+        );
+        return (
+            await Operations(Services)
+                .GetMachineInstanceAsync(
+                    new MachineInstanceKey(SystemMachine, SnapshotOwnerKind.System, Guid.Parse(id)),
+                    CancellationToken.None
+                )
+        )!;
+    }
+
+    [Test]
+    public async Task OneInstancesHistory_ThroughTheSchema_WithinBudget()
+    {
+        // The seed gives half of every machine's instances a history.
+        var instance = await SystemInstanceAsync(withHistory: true);
+        (await ScalarAsync<long>("SELECT count(*) FROM trax.snapshot_transition"))
+            .Should()
+            .BeGreaterThan(Profile.SnapshotDrafts, "the history table is seeded at scale");
+
+        await MeasureAsync(
+            "operations.machineInstance { transitions } (through the schema)",
+            ListBudget,
+            async (_, ct) =>
+            {
+                var instanceField = await OperationsFieldAsync(
+                    HistoryDocument(instance, "first: 25"),
+                    ct
+                );
+                var page = instanceField.GetProperty("transitions");
+                page.GetProperty("items")
+                    .EnumerateArray()
+                    .Select(t => t.GetProperty("revision").GetInt64())
+                    .Should()
+                    .Equal(
+                        Enumerable
+                            .Range(1, BulkSeeder.TransitionsPerInstance)
+                            .Reverse()
+                            .Select(r => (long)r),
+                        "newest first"
+                    );
+                page.GetProperty("nextCursor").ValueKind.Should().Be(JsonValueKind.Null);
+                instanceField.GetRawText().Should().NotContain("stress-context-");
+                instanceField
+                    .GetRawText()
+                    .Should()
+                    .NotContain("stress-history-run-", "never a token");
+            }
+        );
+    }
+
+    [Test]
+    public async Task ADeepHistory_FirstAndDeepPages_WithinBudget()
+    {
+        var instance = await SystemInstanceAsync(withHistory: false);
+
+        Task Clear() =>
+            ExecSqlAsync(
+                $"DELETE FROM trax.snapshot_transition WHERE draft_row_id = {instance.RowId}"
+            );
+        async Task Prepare()
+        {
+            await Clear();
+            await ExecSqlAsync(
+                "INSERT INTO trax.snapshot_transition (draft_row_id, revision, kind, trigger, actor, from_state, "
+                    + "to_state, occurred_at) "
+                    + $"SELECT {instance.RowId}, r, 'command', 'Tick', 'host', 'State' || (r % 8), "
+                    + $"'State' || ((r + 1) % 8), now() - (({DeepHistory} - r) * interval '1 second') "
+                    + $"FROM generate_series(1, {DeepHistory}) r"
+            );
+            await ExecSqlAsync("ANALYZE trax.snapshot_transition");
+        }
+
+        try
+        {
+            foreach (
+                var (label, arguments, newest) in new[]
+                {
+                    ("first page", "first: 100", (long)DeepHistory),
+                    (
+                        "page past half of it",
+                        $"first: 100, after: {DeepHistory / 2}",
+                        (long)DeepHistory / 2 - 1
+                    ),
+                    ("oldest page", "first: 100, after: 101", 100L),
+                }
+            )
+                await MeasureWriteAsync(
+                    $"operations.machineInstance {{ transitions }} over {DeepHistory:N0} rows ({label})",
+                    ListBudget,
+                    prepare: async () =>
+                    {
+                        if (
+                            await ScalarAsync<long>(
+                                $"SELECT count(*) FROM trax.snapshot_transition WHERE draft_row_id = {instance.RowId}"
+                            ) != DeepHistory
+                        )
+                            await Prepare();
+                    },
+                    action: async (_, ct) =>
+                    {
+                        var page = (
+                            await OperationsFieldAsync(HistoryDocument(instance, arguments), ct)
+                        ).GetProperty("transitions");
+                        var items = page.GetProperty("items").EnumerateArray().ToList();
+                        items[0].GetProperty("revision").GetInt64().Should().Be(newest);
+                        items.Should().HaveCount(100);
+                        items[^1]
+                            .GetProperty("previousAt")
+                            .ValueKind.Should()
+                            .Be(newest == 100 ? JsonValueKind.Null : JsonValueKind.String);
+                    },
+                    restore: () => Task.CompletedTask
+                );
+        }
+        finally
+        {
+            await Clear();
+        }
+    }
+
+    // How many instances the stuck tests make overdue: a handful among millions, as a real host
+    // has when one machine's timers stop being fired.
+    private const int OverdueInstances = 200;
+
+    private Task MakeOverdueAsync() =>
+        ExecSqlAsync(
+            "UPDATE trax.snapshot_draft SET due_at = now() - interval '1 hour' WHERE row_id IN "
+                + $"(SELECT row_id FROM trax.snapshot_draft WHERE machine = '{SystemMachine}' "
+                + $"ORDER BY row_id LIMIT {OverdueInstances})"
+        );
+
+    private Task ClearDueAsync() =>
+        ExecSqlAsync("UPDATE trax.snapshot_draft SET due_at = NULL WHERE due_at IS NOT NULL");
+
+    [Test]
+    public async Task StuckOnly_FirstPage_ThroughTheSchema_WithinBudget()
+    {
+        await MeasureWriteAsync(
+            "operations.machineInstances (stuck: true, through the schema)",
+            ListBudget,
+            prepare: MakeOverdueAsync,
+            action: async (_, ct) =>
+            {
+                var page = await OperationsFieldAsync(
+                    "{ operations { machineInstances(stuck: true, take: 100) { totalCount isCountCapped "
+                        + "items { rowId machine state dueAt overdue stuck inStateSince "
+                        + "waitingOn { executionId trainState workQueueEntryId } } } } }",
+                    ct
+                );
+                page.GetProperty("totalCount").GetInt32().Should().Be(OverdueInstances);
+                page.GetProperty("items")
+                    .EnumerateArray()
+                    .Should()
+                    .OnlyContain(i =>
+                        i.GetProperty("stuck").GetBoolean() && i.GetProperty("overdue").GetBoolean()
+                    );
+            },
+            restore: ClearDueAsync
+        );
+    }
+
+    [Test]
+    public async Task FirstPage_WithAttention_ThroughTheSchema_WithinBudget()
+    {
+        // The unfiltered first page with every attention field: one instance in a hundred holds an
+        // invoke token, so the page reads its runs and queue entries too.
+        await MeasureAsync(
+            "operations.machineInstances (attention fields, through the schema)",
+            ListBudget,
+            async (_, ct) =>
+            {
+                var page = await OperationsFieldAsync(
+                    "{ operations { machineInstances(take: 500) { items { rowId hasLiveInvokedRun dueAt "
+                        + "overdue stuck inStateSince waitingOn { executionId trainState workQueueEntryId } } } } }",
+                    ct
+                );
+                page.GetProperty("items").GetArrayLength().Should().Be(500);
+            }
+        );
+    }
+
     [Test]
     public async Task CountsByState_WithinBudget()
     {

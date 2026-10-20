@@ -41,6 +41,7 @@ public interface IOperationsService
     Task<OperationResult> CancelManifestGroupsAsync(IReadOnlyCollection<long> groupIds, CancellationToken ct);
     Task<ManifestExecutionStats> GetManifestExecutionStatsAsync(long manifestId, CancellationToken ct);
     Task<IReadOnlyList<ManifestGroupExecutionStats>> GetManifestGroupExecutionStatsAsync(IReadOnlyCollection<long> groupIds, CancellationToken ct);
+    Task<IReadOnlyList<ManifestUpcomingRuns>> GetUpcomingRunsAsync(IReadOnlyCollection<long> manifestIds, int count, CancellationToken ct);
     Task<LogPage> GetLogsAsync(LogQuery query, CancellationToken ct);
     Task<int> CountLogsAsync(LogQuery query, CancellationToken ct);
     Task<LogCount> CountLogsCappedAsync(LogQuery query, CancellationToken ct);
@@ -55,9 +56,13 @@ public interface IOperationsService
     Task<OperationResult> UpdateManifestGroupAsync(long id, UpdateManifestGroupInput input, CancellationToken ct);
     Task<OperationResult> UpdateSchedulerConfigAsync(UpdateSchedulerConfigInput input, CancellationToken ct);
     Task<MachineInstanceRuns?> GetMachineInstanceRunsAsync(MachineInstanceKey key, CancellationToken ct);
+    Task<MachineInstanceTransitionPage?> GetMachineInstanceTransitionsAsync(MachineInstanceKey key, long? beforeRevision, int take, CancellationToken ct);
     Task<MachineInstanceCancelResult> CancelMachineInstanceAsync(MachineInstanceKey key, CancellationToken ct);
     IAsyncEnumerable<MachineInstanceRecord> WatchMachineInstancesAsync(string? machine, CancellationToken ct);
+    Task<IReadOnlyList<MachineDescription>> GetMachinesAsync(CancellationToken ct);
     Task<DashboardMetrics> GetDashboardMetricsAsync(MetricsRange range, bool hideAdminTrains, CancellationToken ct);
+    Task<MetricSeries> GetMetricSeriesAsync(MetricSeriesScope scope, long? id, string? name, MetricSeriesRange range, CancellationToken ct);
+    Task<Attention> GetAttentionAsync(CancellationToken ct);
     Task<ManifestGroupDependencyGraph?> GetManifestGroupDependencyGraphAsync(long groupId, CancellationToken ct);
     Task<ManifestGroupDependencyGraph> GetGlobalManifestGroupGraphAsync(CancellationToken ct);
     SchedulerConfigSnapshot GetSchedulerConfig();
@@ -73,8 +78,9 @@ public record OperationResult(bool Success, long? Id = null, int? Count = null, 
 | [Queueing and running](#queueing-and-running) | `QueueTrainAsync`, `RunTrainAsync`, `RequeueExecutionAsync`, `ResumeExecutionAsync` |
 | [Batch actions](#batch-actions) | `CancelExecutionsAsync`, `CancelWorkQueueEntriesAsync`, `CancelWorkQueueEntryAsync`, `SetManifestsEnabledAsync`, `SetManifestsReplayDecisionsOnRetryAsync`, `SetManifestGroupsEnabledAsync`, `SetAllManifestGroupsEnabledAsync`, `CancelManifestGroupsAsync`, `TriggerManifestAsync`, `TriggerManifestsAsync`, `TriggerManifestGroupsAsync`, `UpdateManifestAsync` |
 | [Settings](#settings) | `UpdateManifestGroupAsync`, `GetSchedulerConfig`, `UpdateSchedulerConfigAsync` |
-| [Read models](#read-models) | `GetManifestExecutionStatsAsync`, `GetManifestGroupExecutionStatsAsync`, `GetLogsAsync`, `CountLogsAsync`, `CountLogsCappedAsync`, `GetWorkQueueEntryDetailAsync`, `GetRecordedDecisionsAsync`, `GetDashboardMetricsAsync`, `GetManifestGroupDependencyGraphAsync`, `GetGlobalManifestGroupGraphAsync` |
-| [State-machine instances](#state-machine-instances) | `GetMachineInstancesAsync`, `CountMachineInstancesAsync`, `GetMachineInstanceAsync`, `GetMachineInstanceStateCountsAsync`, `WatchMachineInstancesAsync`, `GetMachineInstanceRunsAsync`, `CancelMachineInstanceAsync` |
+| [Read models](#read-models) | `GetManifestExecutionStatsAsync`, `GetManifestGroupExecutionStatsAsync`, `GetUpcomingRunsAsync`, `GetLogsAsync`, `CountLogsAsync`, `CountLogsCappedAsync`, `GetWorkQueueEntryDetailAsync`, `GetRecordedDecisionsAsync`, `GetDashboardMetricsAsync`, `GetMetricSeriesAsync`, `GetAttentionAsync`, `GetManifestGroupDependencyGraphAsync`, `GetGlobalManifestGroupGraphAsync` |
+| [State-machine instances](#state-machine-instances) | `GetMachineInstancesAsync`, `CountMachineInstancesAsync`, `GetMachineInstanceAsync`, `GetMachineInstanceStateCountsAsync`, `WatchMachineInstancesAsync`, `GetMachineInstanceRunsAsync`, `GetMachineInstanceTransitionsAsync`, `CancelMachineInstanceAsync` |
+| [State-machine definitions](#state-machine-definitions) | `GetMachinesAsync` |
 
 ## Queueing and running
 
@@ -407,12 +413,15 @@ run's recorded decisions, a work queue entry's page and the State Machines pages
 |--------|---------|
 | [`GetManifestExecutionStatsAsync(manifestId, ct)`](#getmanifestexecutionstatsasync) | `ManifestExecutionStats` |
 | [`GetManifestGroupExecutionStatsAsync(groupIds, ct)`](#getmanifestgroupexecutionstatsasync) | `IReadOnlyList<ManifestGroupExecutionStats>` |
+| [`GetUpcomingRunsAsync(manifestIds, count, ct)`](#getupcomingrunsasync) | `IReadOnlyList<ManifestUpcomingRuns>` |
 | [`GetLogsAsync(LogQuery, ct)`](#getlogsasync) | `LogPage` |
 | [`CountLogsAsync(LogQuery, ct)`](#countlogsasync) | `int` |
 | [`CountLogsCappedAsync(LogQuery, ct)`](#countlogscappedasync) | `LogCount` |
 | [`GetWorkQueueEntryDetailAsync(id, ct)`](#getworkqueueentrydetailasync) | `WorkQueueEntryDetail?` |
 | [`GetRecordedDecisionsAsync(metadataId, afterId, take, ct)`](#getrecordeddecisionsasync) | `RecordedDecisionPage` |
 | [`GetDashboardMetricsAsync(range, hideAdminTrains, ct)`](#getdashboardmetricsasync) | `DashboardMetrics` |
+| [`GetMetricSeriesAsync(scope, id, name, range, ct)`](#getmetricseriesasync) | `MetricSeries` |
+| [`GetAttentionAsync(ct)`](#getattentionasync) | `Attention` |
 | [`GetManifestGroupDependencyGraphAsync(groupId, ct)`](#getmanifestgroupdependencygraphasync) | `ManifestGroupDependencyGraph?` |
 | [`GetGlobalManifestGroupGraphAsync(ct)`](#getglobalmanifestgroupgraphasync) | `ManifestGroupDependencyGraph` |
 
@@ -422,7 +431,20 @@ run's recorded decisions, a work queue entry's page and the State Machines pages
 
 ### GetManifestGroupExecutionStatsAsync
 
-One `ManifestGroupExecutionStats` per distinct id, in the order given: manifest count, run counts and the latest run. Zeros for a group with no manifests or runs; an empty list for no ids; more than 1000 ids throws `ArgumentOutOfRangeException`.
+One `ManifestGroupExecutionStats` per distinct id, in the order given: manifest count, run counts and the latest run. `LastEndedRunFailed` says whether the group's latest ended run (completed, failed or cancelled, by start time) failed. Zeros for a group with no manifests or runs; an empty list for no ids; more than 1000 ids throws `ArgumentOutOfRangeException`.
+
+### GetUpcomingRunsAsync
+
+When each manifest runs next, one `ManifestUpcomingRuns` per distinct id that names a manifest, in the order given:
+
+| Field | Meaning |
+|-------|---------|
+| `ManifestId` | The manifest. |
+| `ScheduleText` | The schedule in plain words: `Daily at 02:00 UTC`, `Every 5 minutes`, `Weekdays at 09:00 UTC`, `After nightly-import succeeds`, `On demand`. A cron with no plain reading reads `Cron 0 9-17 * * 1-5 (UTC)`. A variance adds `, up to 2 minutes late`. |
+| `NextRuns` | The next `count` times the manifest manager will find the manifest due, earliest first, in UTC. The first is now when it is due already. |
+| `RunsAfterManifestId`, `RunsAfterManifestExternalId` | For a dependent that can run, the manifest whose success starts it; null otherwise. |
+
+The times come from the manager's own due-ness check, so the two cannot disagree: exclusion windows are skipped the way the manager skips them, which under the default `FireOnceNow` misfire policy means one catch-up run as the window ends (see [Exclusion Windows](/docs/scheduler/exclusions#interaction-with-misfire-policies)). Each run is assumed to succeed when it is due; a retry's backoff, the jitter a variance adds after the next run, and the manager's polling interval are not shown. `NextRuns` is empty for a manual, on-demand, dependent or dormant dependent manifest, and for one that is disabled, sits in a disabled group, or has a dead letter awaiting intervention. `count` is clamped to 0 through `OperationsService.MaxUpcomingRuns` (10). An empty list for no ids; more than 1000 ids throws `ArgumentOutOfRangeException`.
 
 ### GetLogsAsync
 
@@ -440,6 +462,12 @@ A `LogCount(int Count, bool Capped)` for a pager. Without a text filter, the exa
 
 A `WorkQueueEntryDetail`, or `null` when no entry has the id: the entry's fields, its input masked as [below](#masking-a-stored-input), and for a queued entry with a subject, what it waits on. `SubjectHeldBy` is the dispatched entry for the same subject whose run is still `Pending` or `InProgress`; when nothing holds the subject, `SubjectQueuedBehind` is the confirmed queued sibling dispatch would offer first, by the filters dispatch applies (due, its manifest group enabled) and then priority and age. The dashboard's work queue entry page and the API's [`workQueue.detail`](/docs/sdk-reference/graphql-api/queries/work-queue#detail) both read it.
 
+### LookupAsync
+
+`LookupAsync(string text, CancellationToken ct)` finds what an id, key or name names when the caller does not know its kind, and returns a list of `LookupMatch(LookupKind Kind, string Id, string Label, string MatchedOn)`. `Kind` is `Run`, `Manifest`, `WorkQueueEntry`, `DeadLetter`, `MachineInstance` or `Train`; `Id` is the id the kind's page takes (a number, an instance's GUID, or a train's full name); `Label` is the train, manifest or machine with its state; `MatchedOn` is the field the text matched, `id`, `externalId`, `name` or `subjectKey`. A `MachineInstance` match also carries `Machine`, `OwnerKind` and `RowId`, which `GetMachineInstanceAsync` takes for a user's draft, and never the instance's context or whose a draft is.
+
+The text is trimmed and matched exactly, never by prefix or contents. A positive number is looked up as the id of a run, manifest, work queue entry and dead letter; a GUID as an instance id; any text as a run's or manifest's or entry's external id, a manifest's name, an entry's subject key (the entries still queued or dispatched under it) and a registered train's full or friendly name. Every read is an exact match on an indexed column, at most `OperationsService.LookupMatchCap` (10) of each kind. Empty text, or text longer than `OperationsService.LookupTextLimit` (512), finds nothing. The API's [`lookup`](/docs/sdk-reference/graphql-api/queries/operations#lookup) calls it. A custom implementation that does not override it throws `NotSupportedException`.
+
 ### GetRecordedDecisionsAsync
 
 A `RecordedDecisionPage` of the run's rows in `trax.decision`, in the order they were recorded, with answers withheld as described [below](#recorded-decisions). `afterId` is the previous page's `NextCursor`; `take` is clamped to 1 through 500. A run with no decisions gets an empty page.
@@ -451,12 +479,32 @@ granularity of the executions-over-time chart only; `hideAdminTrains` leaves the
 trains (`AdminTrains.FullNames`) out of every series, as the dashboard's "Hide admin trains" toggle
 does. The fields are listed under the GraphQL [queries](/docs/sdk-reference/graphql-api/queries).
 
+### GetMetricSeriesAsync
+
+Runs over time for one train (`MetricSeriesScope.Train`, by `name`, its interface FullName), manifest (`Manifest`, by `id`) or group (`Group`, by `id`, every manifest in it). A `MetricSeries` with every bucket of the `MetricSeriesRange`, oldest first: `LastHour` in 60 one-minute buckets, `Last24Hours` in 96 of 15 minutes, `Last7Days` in 168 of an hour, `Last30Days` in 120 of 6 hours. Each `MetricSeriesBucket` counts the runs that started in it and completed, failed or were cancelled, and gives `P50DurationMs` and `P95DurationMs` of the completed ones, read from a duration histogram grouped in the database (bins about 13% wide; never outside the durations recorded; null when none completed). A train scope without a name, a manifest or group scope without an id, and a range `OperationsService.MetricSeriesRefusal(scope, range)` refuses throw `ArgumentException`. `MetricSeriesRefusal` refuses `Last30Days` for every scope: over a million runs in one train, manifest or group, the 30-day series took 560 to 660 ms on the Trax.Api stress fixture, over the 450 ms dashboard metrics budget, while the 7-day one (about 230,000 runs) took 170 to 340 ms. The cost follows the number of runs in the window, so a scope with far more runs a week than that fixture reads proportionally slower. The fields are listed under the GraphQL [metrics queries](/docs/sdk-reference/graphql-api/queries/metrics#series).
+
+### GetAttentionAsync
+
+`GetAttentionAsync(CancellationToken ct)` returns an `Attention`: what needs an operator's attention right now, in one read, for the console's Overview. Its lists hold at most `OperationsService.AttentionListCap` (50) entries each, largest or worst first, and every entry carries `Link`, the console path and query that lists what it counts.
+
+| Property | What it holds |
+|----------|---------------|
+| `Scheduler` | An `AttentionScheduler`: `ManifestManagerEnabled` and `JobDispatcherEnabled` from the live scheduler settings, and `Paused`, true when either is off. `Link` is `/system/scheduler`. |
+| `DeadLetters` | `AttentionDeadLetterGroup` rows: the dead letters awaiting intervention, grouped by the `TrainName` their manifest runs and their `Reason`, with `Count` and `OldestDeadLetteredAt`. `Link` is `/runs/dead-letters?status=AWAITING_INTERVENTION&train=…&reason=…`. |
+| `FailingTrains` | `AttentionFailingTrain` rows: each train that failed at least once among the runs started in the last hour and whose `LastHourFailureRate` (`FailedLastHour` over `FinishedLastHour`) is above its `BaselineFailureRate`, the rate of the runs it started in the seven days before that hour. A rate counts completed and failed runs, not cancelled ones; a train with no earlier finished run has a baseline of 0. `Link` is `/runs?state=FAILED&train=…`. |
+| `StuckInstances` | `AttentionStuckInstances` rows: the stuck state-machine instances (see [`GetMachineInstancesAsync`](#getmachineinstancesasync) for the rule), grouped by `Machine` and `State` with `Count`, system instances and users' drafts together and never naming either. `Link` is `/machines/{machine}?state=…&stuck=true`. |
+| `Queue` | An `AttentionQueue`: `Queued`, the entries queued, confirmed and due, and `OldestQueuedAt` and `OldestAgeSeconds` for the oldest of them (null when none). `Link` is `/runs/queued?status=QUEUED`. |
+| `OfflineHosts` | `AttentionHost` rows: each host in the heartbeat table that has missed three beats, with `InstanceId`, `HostName`, `LastHeartbeatAt` and `RunsDispatcher`, most recently seen first. `Link` is `/system/hosts`. |
+| `AsOf` | When the read was made (UTC). |
+
+The reads run at once, each through an index: dead letters by status, the week of finished runs through the metrics index, stuck instances through the partial indexes on due time and invoke token, the dispatchable queue entries, and the heartbeat table. Enum values in a `Link` are spelled as the GraphQL schema spells them. The API's [`attention`](/docs/sdk-reference/graphql-api/queries/operations#attention) calls it. A custom implementation that does not override it throws `NotSupportedException`.
+
 ### GetManifestGroupDependencyGraphAsync
 
 The cross-group dependency graph around one group: the group and the groups its manifests depend on
 or are depended on by, as nodes, and each cross-group dependency as a parent to dependent edge.
-`null` when no group has the id; a group with no cross-group dependencies gives a graph of the group
-alone.
+Each node carries `IsEnabled`, whether its group is enabled. `null` when no group has the id; a group
+with no cross-group dependencies gives a graph of the group alone.
 
 ### GetGlobalManifestGroupGraphAsync
 
@@ -572,14 +620,17 @@ value is `{"_redacted": true}`.
 ## State-machine instances
 
 The operator's read-only view of `trax.snapshot_draft`: the dashboard's
-[State Machines pages](/docs/dashboard/pages#state-machines) and the API's
+[Machines pages](/docs/dashboard/machines) and the API's
 [`machineInstances`, `machineInstance` and `machineInstanceCounts`](/docs/sdk-reference/graphql-api/queries/machine-instances#machineinstances)
 read through these four methods, and one instance's runs and its cancel through the two after them.
 
 ```csharp fragment
 public record MachineInstanceQuery(
     string? Machine = null, string? State = null, SnapshotOwnerKind? OwnerKind = null,
-    int Skip = 0, int Take = 25);
+    int Skip = 0, int Take = 25)
+{
+    public bool? Stuck { get; init; }
+}
 
 public record MachineInstanceKey(string Machine, SnapshotOwnerKind OwnerKind, Guid Id, long? RowId = null);
 
@@ -589,7 +640,12 @@ public record MachineInstanceRecord(
 
 public record MachineInstancePage(IReadOnlyList<MachineInstanceRecord> Items, int Skip, int Take);
 public record MachineInstanceTotal(int Count, bool Capped);
-public record MachineInstanceStateCount(string Machine, string State, SnapshotOwnerKind OwnerKind, long Count);
+public record MachineInstanceStateCount(string Machine, string State, SnapshotOwnerKind OwnerKind, long Count)
+{
+    public long Stuck { get; init; }
+}
+
+public record MachineInstanceWaitingOn(long? ExecutionId, TrainState? TrainState, long? WorkQueueEntryId);
 ```
 
 | Method | Returns |
@@ -624,6 +680,18 @@ The live feed of instances: each instance once whenever any path on any host wri
 `MachineInstanceRecord` also carries `Revision`, the instance's revision, as an init-only property: 1
 when the row was created and one more for every write since, bumped by the database; and `Deleted`, set
 only on the live feed, on the instance as it was last seen before it was deleted or expired.
+
+The list and the lookup also say whether an instance needs attention (the live feed leaves these
+unset): `DueAt`, when its state's timer fires; `Overdue`, when that is past by more than
+`StateMachineOptions.InvokeOutcomeSweepInterval`, the reconciler's pace; `WaitingOn`, the run its
+state waits on as a `MachineInstanceWaitingOn` (its `ExecutionId`, null while still queued, its
+`TrainState`, `Pending` while queued and `Cancelled` for an entry cancelled before it started, and
+its `WorkQueueEntryId`), never the invoke token; `Stuck`, when it is overdue or its run failed or was
+cancelled and the outcome was never applied (a run that ended more than one sweep ago, or an entry
+cancelled while queued); and `InStateSince`, which is `UpdatedAt` until a transition log is kept.
+`MachineInstanceQuery.Stuck` lists only the stuck instances (`true`) or only the others (`false`),
+and `MachineInstanceStateCount.Stuck` counts them per state, in a second grouped read of the stuck
+rows alone, kept in the same five-second cache as the counts.
 
 A record never carries the snapshot's context or the owning user's key. The context is an untyped
 JSON object, so nothing could mask its sensitive parts; an operator sees where an instance is and
@@ -667,6 +735,25 @@ public record MachineInstanceCancelResult(
 
 The runs the instance invoked, newest first, at most `OperationsService.MachineInstanceRunCap` (50), with the one its state waits on marked `IsLive`; `QueuedEntryId` is that run's work queue entry while it is still queued. `null` when no row matches. A system instance lists every run linked to it (read through `ix_metadata_invoking_instance`); a user's draft lists only the run its own invoke token names, because a run does not record which user's draft queued it. Never a run's input or output.
 
+### GetMachineInstanceTransitionsAsync
+
+One page of the instance's history, newest first: a `MachineInstanceTransitionRecord` for every snapshot write Trax
+recorded (`trax.snapshot_transition`), or `null` when no row matches. Each carries the `Revision`, the `Kind`
+(`SnapshotTransitionKind`: `Start`, `Command`, `Save`, `Timer`, `Outcome`), the `Trigger`, the `Actor`
+(`SnapshotTransitionActor`: `Owner`, `Host`, `Machine`, never which user), `FromState`, `ToState`, `At`,
+`PreviousAt` (the transition before it), and what it started: `StartedRun` (`MachineInstanceStartedRun`, with
+`ExecutionId`, `TrainState` and `WorkQueueEntryId`, never the token) or `StartedChild`
+(`MachineInstanceStartedChild`, with `Machine`, `OwnerKind`, `Id` and `RowId`). `take` is clamped to 1 through 500;
+pass the page's `NextCursor` as `beforeRevision` for older ones, null on the last page. The history is the row's, so a
+user's draft shows only its own. It is read by row id through `uq_snapshot_transition_draft_revision`, so a page costs
+its rows whatever the history's length. The API serves it as
+[`machineInstance { transitions }`](/docs/sdk-reference/graphql-api/queries/machine-instances#transitions).
+
+```csharp fragment
+public record MachineInstanceTransitionPage(
+    IReadOnlyList<MachineInstanceTransitionRecord> Items, int Take, long? NextCursor);
+```
+
 ### CancelMachineInstanceAsync
 
 Cancels a system-owned instance's live run: a still-queued entry is marked Cancelled by one conditional statement, and a dispatched run is flagged as `CancelExecutionsAsync` flags one. The dispatcher claims an entry and writes its run in one transaction, so the run either never starts or is cancelled. When this host registers the machine (`AddStateMachines`), a queued run's Cancelled outcome is applied in the call (`Moved`); otherwise a host that does applies it (`RunCancelled`). Every delivery is the one conditional update on the token, so the outcome is applied once. A dispatched run's outcome is applied when it ends (`CancelRequested`). Refused, with a typed outcome and changing nothing: `UserOwned`, `NotFound`, `NoLiveRun`, `RunEnded`.
@@ -686,6 +773,69 @@ The messages are public members of `OperationsService`, and both surfaces show t
 
 A requeue of a run a machine invoked is refused with `InvokedRunRequeueRefusal(metadataId, machine)`,
 and an operator's cancel of a run a user's draft started with `UserOwnedRunCancelRefusal`.
+
+## State-machine definitions
+
+The machines the host registers, described from what each declares rather than from its instances,
+so a machine with none is listed. The console's Machines page and the API's
+[`operations.machines`](/docs/sdk-reference/graphql-api/queries/machine-instances#machines) read
+through this method.
+
+```csharp fragment
+public record MachineDescription(string Name, int Version, bool SystemOwned)
+{
+    public string? SchemaHash { get; init; }
+    public string? InitialState { get; init; }
+    public IReadOnlyList<MachineStateDescription> States { get; init; }
+    public IReadOnlyList<MachineTransitionDescription> Transitions { get; init; }
+    public IReadOnlyList<MachineTimerDescription> Timers { get; init; }
+    public string? GraphUnavailableReason { get; init; }
+}
+
+public record MachineStateDescription(string Name)
+{
+    public bool IsInitial { get; init; }
+    public bool IsFinal { get; init; }
+    public bool IsCommitted { get; init; }
+    public string? InvokesTrain { get; init; }
+    public string? SpawnsMachine { get; init; }
+}
+
+public enum MachineTransitionKind { Command, Timer, Outcome }
+
+public record MachineTransitionDescription(string From, string Command, string To, MachineTransitionKind Kind)
+{
+    public string? Guard { get; init; }
+    public string? Effect { get; init; }
+    public string? After { get; init; }
+}
+
+public record MachineTimerDescription(string State, string Command, string Target)
+{
+    public string? After { get; init; }
+    public string? Field { get; init; }
+    public string? Min { get; init; }
+    public string? Max { get; init; }
+}
+```
+
+| Method | Returns |
+|--------|---------|
+| [`GetMachinesAsync(ct)`](#getmachinesasync) | every registered machine, ordered by name |
+
+### GetMachinesAsync
+
+Every machine registered in the container, each type once, ordered by name. The graph is read from
+the machine's IR (`IMachine.ExportIr()`) by the same reading
+[`trax machine show`](/docs/reference/cli) draws it from, so the two list the same states and edges
+in the same order: the commands, then the timers, then each invoking state's outcomes in the order
+they are tried. `IsFinal` is true for a state no transition leaves. `InvokesTrain` is the invoked
+train's interface full name and `SpawnsMachine` the spawned machine's id. A timer appears twice: as
+a `Timer` transition, whose `After` is the duration on one line, and in `Timers` with the fixed
+duration (`After`) or the context field and its bounds (`Field`, `Min`, `Max`), all ISO-8601. A
+machine declared with C# delegates has no IR: it is listed with its name, version and
+`GraphUnavailableReason`, and no states. Each description is built once per machine and kept,
+since a machine's definition does not change while the host runs. It reads no table.
 
 ## Behavior
 

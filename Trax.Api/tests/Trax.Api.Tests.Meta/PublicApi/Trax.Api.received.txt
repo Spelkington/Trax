@@ -18,6 +18,90 @@ namespace Trax.Api.DTOs
         public bool Success { get; init; }
         public int TooLateToAskAfresh { get; init; }
     }
+    public sealed class BulkDeadLetterFilter : System.IEquatable<Trax.Api.DTOs.BulkDeadLetterFilter>
+    {
+        public BulkDeadLetterFilter() { }
+        public long? ManifestId { get; init; }
+        public Trax.Effect.Enums.DeadLetterStatus? Status { get; init; }
+    }
+    public sealed class BulkExecutionFilter : System.IEquatable<Trax.Api.DTOs.BulkExecutionFilter>
+    {
+        public BulkExecutionFilter() { }
+        public string? ExternalId { get; init; }
+        public Trax.Core.Exceptions.FailureClass? FailureClass { get; init; }
+        public string? FailureJunction { get; init; }
+        public string? FailureReasonContains { get; init; }
+        public bool? HideAdminTrains { get; init; }
+        public string? HostName { get; init; }
+        public long? ManifestGroupId { get; init; }
+        public long? ManifestId { get; init; }
+        public long? ParentId { get; init; }
+        public System.DateTime? StartedAfter { get; init; }
+        public System.DateTime? StartedBefore { get; init; }
+        public string? TrainName { get; init; }
+        public Trax.Effect.Enums.TrainState? TrainState { get; init; }
+    }
+    public sealed class BulkManifestFilter : System.IEquatable<Trax.Api.DTOs.BulkManifestFilter>
+    {
+        public BulkManifestFilter() { }
+        public bool? HideAdminTrains { get; init; }
+        public bool? IsEnabled { get; init; }
+        public long? ManifestGroupId { get; init; }
+        public string? NameContains { get; init; }
+        public Trax.Effect.Enums.ScheduleType? ScheduleType { get; init; }
+    }
+    public sealed class BulkOperation
+    {
+        public string Actor { get; }
+        public bool AskAfresh { get; }
+        public int Done { get; }
+        public int Failed { get; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.BulkOperationFailureReason> FailureReasons { get; }
+        public Trax.Api.DTOs.BulkOperationFilter Filter { get; }
+        public System.DateTime? FinishedAt { get; }
+        public System.Guid Id { get; }
+        public Trax.Api.DTOs.BulkOperationKind Kind { get; }
+        public string Message { get; }
+        public System.DateTime StartedAt { get; }
+        public Trax.Api.DTOs.BulkOperationStatus Status { get; }
+        public int Total { get; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.BulkOperationFailure> GetFailures(int take = 100, long? afterId = default) { }
+    }
+    public sealed class BulkOperationFailure : System.IEquatable<Trax.Api.DTOs.BulkOperationFailure>
+    {
+        public BulkOperationFailure(long Id, string Reason) { }
+        public long Id { get; init; }
+        public string Reason { get; init; }
+    }
+    public sealed class BulkOperationFailureReason : System.IEquatable<Trax.Api.DTOs.BulkOperationFailureReason>
+    {
+        public BulkOperationFailureReason(string Reason, int Count) { }
+        public int Count { get; init; }
+        public string Reason { get; init; }
+    }
+    public sealed class BulkOperationFilter : System.IEquatable<Trax.Api.DTOs.BulkOperationFilter>
+    {
+        public BulkOperationFilter() { }
+        public Trax.Api.DTOs.BulkDeadLetterFilter? DeadLetters { get; init; }
+        public Trax.Api.DTOs.BulkExecutionFilter? Executions { get; init; }
+        public Trax.Api.DTOs.BulkManifestFilter? Manifests { get; init; }
+    }
+    public enum BulkOperationKind
+    {
+        Cancel = 0,
+        Requeue = 1,
+        Acknowledge = 2,
+        Trigger = 3,
+        Enable = 4,
+        Disable = 5,
+    }
+    public enum BulkOperationStatus
+    {
+        Running = 0,
+        Finished = 1,
+        Failed = 2,
+        Canceled = 3,
+    }
     public class ConfigureEffectResponse : System.IEquatable<Trax.Api.DTOs.ConfigureEffectResponse>
     {
         public ConfigureEffectResponse(bool Success, int Count, string Message, System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.EffectSettingError> Errors) { }
@@ -57,6 +141,7 @@ namespace Trax.Api.DTOs
         public DeadLetterSummary(long Id, long ManifestId, string ManifestName, Trax.Effect.Enums.DeadLetterStatus Status, System.DateTime DeadLetteredAt, string Reason, int RetryCountAtDeadLetter, System.DateTime? ResolvedAt, string? ResolutionNote, long? RetryMetadataId) { }
         public System.DateTime DeadLetteredAt { get; init; }
         public long Id { get; init; }
+        public string? ManifestExternalId { get; init; }
         public long ManifestId { get; init; }
         public string ManifestName { get; init; }
         public string Reason { get; init; }
@@ -185,6 +270,7 @@ namespace Trax.Api.DTOs
         public bool CancellationRequested { get; init; }
         public int ChildCount { get; init; }
         public string? CurrentlyRunningJunction { get; init; }
+        public long? DeadLetterId { get; init; }
         public System.DateTime? EndTime { get; init; }
         public string? Executor { get; init; }
         public string ExternalId { get; init; }
@@ -198,6 +284,7 @@ namespace Trax.Api.DTOs
         public string? HostName { get; init; }
         public long Id { get; init; }
         public string? Input { get; init; }
+        public Trax.Api.DTOs.RunInvoker? InvokedBy { get; init; }
         public System.DateTime? JunctionStartedAt { get; init; }
         public long? ManifestId { get; init; }
         public string Name { get; init; }
@@ -211,6 +298,7 @@ namespace Trax.Api.DTOs
         public string? StackTrace { get; init; }
         public System.DateTime StartTime { get; init; }
         public Trax.Effect.Enums.TrainState TrainState { get; init; }
+        public long? WorkQueueEntryId { get; init; }
     }
     public class ExecutionSummary : System.IEquatable<Trax.Api.DTOs.ExecutionSummary>
     {
@@ -244,13 +332,19 @@ namespace Trax.Api.DTOs
     }
     public class HostInfo : System.IEquatable<Trax.Api.DTOs.HostInfo>
     {
-        public HostInfo(string InstanceId, string? Name, string? Environment, System.DateTime LastSeen, long TotalExecutions, int CurrentlyRunning) { }
+        public HostInfo(string InstanceId, string Name, string Environment, string TraxVersion, System.DateTime StartedAt, System.DateTime LastHeartbeat, bool Online, bool RunsDispatcher, bool RunsManifestManager, int? WorkerSlots, int? WorkerSlotsInUse, int CurrentlyRunning) { }
         public int CurrentlyRunning { get; init; }
-        public string? Environment { get; init; }
+        public string Environment { get; init; }
         public string InstanceId { get; init; }
-        public System.DateTime LastSeen { get; init; }
-        public string? Name { get; init; }
-        public long TotalExecutions { get; init; }
+        public System.DateTime LastHeartbeat { get; init; }
+        public string Name { get; init; }
+        public bool Online { get; init; }
+        public bool RunsDispatcher { get; init; }
+        public bool RunsManifestManager { get; init; }
+        public System.DateTime StartedAt { get; init; }
+        public string TraxVersion { get; init; }
+        public int? WorkerSlots { get; init; }
+        public int? WorkerSlotsInUse { get; init; }
     }
     public class InputPropertySchema : System.IEquatable<Trax.Api.DTOs.InputPropertySchema>
     {
@@ -350,19 +444,69 @@ namespace Trax.Api.DTOs
         public string Category { get; init; }
         public Microsoft.Extensions.Logging.LogLevel Level { get; init; }
     }
+    public class MachineDefinition : System.IEquatable<Trax.Api.DTOs.MachineDefinition>
+    {
+        public MachineDefinition(string Name, int Version, bool SystemOwned) { }
+        public string? GraphUnavailableReason { get; init; }
+        public string? InitialState { get; init; }
+        public string Name { get; init; }
+        public string? SchemaHash { get; init; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.MachineDefinitionState> States { get; init; }
+        public bool SystemOwned { get; init; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.MachineDefinitionTimer> Timers { get; init; }
+        public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.MachineDefinitionTransition> Transitions { get; init; }
+        public int Version { get; init; }
+    }
+    public class MachineDefinitionState : System.IEquatable<Trax.Api.DTOs.MachineDefinitionState>
+    {
+        public MachineDefinitionState(string Name) { }
+        public string? InvokesTrain { get; init; }
+        public bool IsCommitted { get; init; }
+        public bool IsFinal { get; init; }
+        public bool IsInitial { get; init; }
+        public string Name { get; init; }
+        public string? SpawnsMachine { get; init; }
+    }
+    public class MachineDefinitionTimer : System.IEquatable<Trax.Api.DTOs.MachineDefinitionTimer>
+    {
+        public MachineDefinitionTimer(string State, string Command, string Target) { }
+        public string? After { get; init; }
+        public string Command { get; init; }
+        public string? Field { get; init; }
+        public string? Max { get; init; }
+        public string? Min { get; init; }
+        public string State { get; init; }
+        public string Target { get; init; }
+    }
+    public class MachineDefinitionTransition : System.IEquatable<Trax.Api.DTOs.MachineDefinitionTransition>
+    {
+        public MachineDefinitionTransition(string From, string Command, string To, Trax.Scheduler.Services.Operations.MachineTransitionKind Kind) { }
+        public string? After { get; init; }
+        public string Command { get; init; }
+        public string? Effect { get; init; }
+        public string From { get; init; }
+        public string? Guard { get; init; }
+        public Trax.Scheduler.Services.Operations.MachineTransitionKind Kind { get; init; }
+        public string To { get; init; }
+    }
     public class MachineInstance : System.IEquatable<Trax.Api.DTOs.MachineInstance>
     {
         public MachineInstance(long RowId, string Machine, Trax.Effect.Enums.SnapshotOwnerKind OwnerKind, System.Guid Id, string State, int Version, System.DateTimeOffset? CreatedAt, System.DateTimeOffset UpdatedAt, bool HasLiveInvokedRun) { }
         public System.DateTimeOffset? CreatedAt { get; init; }
+        public System.DateTimeOffset? DueAt { get; init; }
         public bool HasLiveInvokedRun { get; init; }
         public System.Guid Id { get; init; }
+        public System.DateTimeOffset InStateSince { get; init; }
         public string Machine { get; init; }
+        public bool Overdue { get; init; }
         public Trax.Effect.Enums.SnapshotOwnerKind OwnerKind { get; init; }
         public long? Revision { get; init; }
         public long RowId { get; init; }
         public string State { get; init; }
+        public bool Stuck { get; init; }
         public System.DateTimeOffset UpdatedAt { get; init; }
         public int Version { get; init; }
+        public Trax.Api.DTOs.MachineInstanceWaitingRun? WaitingOn { get; init; }
     }
     public class MachineInstanceCancelResponse : System.IEquatable<Trax.Api.DTOs.MachineInstanceCancelResponse>
     {
@@ -395,23 +539,29 @@ namespace Trax.Api.DTOs
         public string Machine { get; init; }
         public Trax.Effect.Enums.SnapshotOwnerKind OwnerKind { get; init; }
         public string State { get; init; }
+        public long Stuck { get; init; }
     }
     public class MachineInstanceDetail : System.IEquatable<Trax.Api.DTOs.MachineInstanceDetail>
     {
         public MachineInstanceDetail(long RowId, string Machine, Trax.Effect.Enums.SnapshotOwnerKind OwnerKind, System.Guid Id, string State, int Version, System.DateTimeOffset? CreatedAt, System.DateTimeOffset UpdatedAt, bool HasLiveInvokedRun) { }
         public System.DateTimeOffset? CreatedAt { get; init; }
+        public System.DateTimeOffset? DueAt { get; init; }
         public bool HasLiveInvokedRun { get; init; }
         public System.Guid Id { get; init; }
+        public System.DateTimeOffset InStateSince { get; init; }
         public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.MachineInstanceInvokedRun> InvokedRuns { get; init; }
         public bool IsInvokedRunsCapped { get; init; }
         public string Machine { get; init; }
+        public bool Overdue { get; init; }
         public Trax.Effect.Enums.SnapshotOwnerKind OwnerKind { get; init; }
         public long? QueuedInvokedRunEntryId { get; init; }
         public long? Revision { get; init; }
         public long RowId { get; init; }
         public string State { get; init; }
+        public bool Stuck { get; init; }
         public System.DateTimeOffset UpdatedAt { get; init; }
         public int Version { get; init; }
+        public Trax.Api.DTOs.MachineInstanceWaitingRun? WaitingOn { get; init; }
     }
     public class MachineInstanceInvokedRun : System.IEquatable<Trax.Api.DTOs.MachineInstanceInvokedRun>
     {
@@ -425,6 +575,48 @@ namespace Trax.Api.DTOs
         public string Name { get; init; }
         public System.DateTime StartTime { get; init; }
         public Trax.Effect.Enums.TrainState TrainState { get; init; }
+    }
+    public class MachineInstanceTransition : System.IEquatable<Trax.Api.DTOs.MachineInstanceTransition>
+    {
+        public MachineInstanceTransition(long Revision, Trax.Effect.Enums.SnapshotTransitionKind Kind, string? Trigger, Trax.Effect.Enums.SnapshotTransitionActor Actor, string? FromState, string ToState, System.DateTimeOffset At) { }
+        public Trax.Effect.Enums.SnapshotTransitionActor Actor { get; init; }
+        public System.DateTimeOffset At { get; init; }
+        public string? FromState { get; init; }
+        public Trax.Effect.Enums.SnapshotTransitionKind Kind { get; init; }
+        public System.DateTimeOffset? PreviousAt { get; init; }
+        public long Revision { get; init; }
+        public Trax.Api.DTOs.MachineInstanceTransitionChild? StartedChild { get; init; }
+        public Trax.Api.DTOs.MachineInstanceTransitionRun? StartedRun { get; init; }
+        public string ToState { get; init; }
+        public string? Trigger { get; init; }
+    }
+    public class MachineInstanceTransitionChild : System.IEquatable<Trax.Api.DTOs.MachineInstanceTransitionChild>
+    {
+        public MachineInstanceTransitionChild(string Machine, Trax.Effect.Enums.SnapshotOwnerKind OwnerKind, System.Guid Id, long RowId) { }
+        public System.Guid Id { get; init; }
+        public string Machine { get; init; }
+        public Trax.Effect.Enums.SnapshotOwnerKind OwnerKind { get; init; }
+        public long RowId { get; init; }
+    }
+    public class MachineInstanceTransitionRun : System.IEquatable<Trax.Api.DTOs.MachineInstanceTransitionRun>
+    {
+        public MachineInstanceTransitionRun(long? ExecutionId, Trax.Effect.Enums.TrainState? TrainState, long? WorkQueueEntryId) { }
+        public long? ExecutionId { get; init; }
+        public Trax.Effect.Enums.TrainState? TrainState { get; init; }
+        public long? WorkQueueEntryId { get; init; }
+    }
+    public class MachineInstanceTransitions : System.IEquatable<Trax.Api.DTOs.MachineInstanceTransitions>
+    {
+        public MachineInstanceTransitions(System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.MachineInstanceTransition> Items, long? NextCursor) { }
+        public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.MachineInstanceTransition> Items { get; init; }
+        public long? NextCursor { get; init; }
+    }
+    public class MachineInstanceWaitingRun : System.IEquatable<Trax.Api.DTOs.MachineInstanceWaitingRun>
+    {
+        public MachineInstanceWaitingRun(long? ExecutionId, Trax.Effect.Enums.TrainState? TrainState, long? WorkQueueEntryId) { }
+        public long? ExecutionId { get; init; }
+        public Trax.Effect.Enums.TrainState? TrainState { get; init; }
+        public long? WorkQueueEntryId { get; init; }
     }
     public class ManifestDetail : System.IEquatable<Trax.Api.DTOs.ManifestDetail>
     {
@@ -504,6 +696,7 @@ namespace Trax.Api.DTOs
         public long Failed { get; init; }
         public long GroupId { get; init; }
         public long InProgress { get; init; }
+        public bool LastEndedRunFailed { get; init; }
         public System.DateTime? LastRun { get; init; }
         public long ManifestCount { get; init; }
         public long TotalExecutions { get; init; }
@@ -562,6 +755,7 @@ namespace Trax.Api.DTOs
         public RunGraph(long MetadataId, string Train, bool HasGraph, string? Hash, System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.RunGraphNode> Nodes, System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.JunctionStep> UnmatchedSteps, bool MoreSteps) { }
         public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.RunGraphNode> AllNodes { get; }
         public bool CanResume { get; init; }
+        public bool ChainChanged { get; init; }
         public bool HasGraph { get; init; }
         public string? Hash { get; init; }
         public long MetadataId { get; init; }
@@ -599,6 +793,14 @@ namespace Trax.Api.DTOs
         public System.Collections.Generic.IReadOnlyList<Trax.Api.DTOs.RunGraphNode> Nodes { get; init; }
         public bool Taken { get; init; }
     }
+    public sealed class RunInvoker : System.IEquatable<Trax.Api.DTOs.RunInvoker>
+    {
+        public RunInvoker(string Machine, System.Guid InstanceId, Trax.Effect.Enums.SnapshotOwnerKind OwnerKind, long? RowId) { }
+        public System.Guid InstanceId { get; init; }
+        public string Machine { get; init; }
+        public Trax.Effect.Enums.SnapshotOwnerKind OwnerKind { get; init; }
+        public long? RowId { get; init; }
+    }
     public enum RunNodeState
     {
         NotReached = 0,
@@ -629,6 +831,14 @@ namespace Trax.Api.DTOs
     {
         Newest = 0,
         Oldest = 1,
+    }
+    public sealed class StartBulkOperationResponse : System.IEquatable<Trax.Api.DTOs.StartBulkOperationResponse>
+    {
+        public StartBulkOperationResponse(bool Success, string Message, int? Matched, Trax.Api.DTOs.BulkOperation? Operation) { }
+        public int? Matched { get; init; }
+        public string Message { get; init; }
+        public Trax.Api.DTOs.BulkOperation? Operation { get; init; }
+        public bool Success { get; init; }
     }
     public class TrainExecutionStats : System.IEquatable<Trax.Api.DTOs.TrainExecutionStats>
     {

@@ -16,7 +16,7 @@ if your work contradicts one, say so rather than silently overriding it.
 | --- | --- |
 | a new sample, or an E2E factory's connection string | [0001](./docs/adr/0001-a-sample-e2e-database-must-be-one-ci-provisions.md), a factory CI does not provision reports green while testing nothing |
 | a guard fixture, here or upstream | [0002](./docs/adr/0002-the-samples-adopt-the-guards-as-a-consumer-would.md), Bookworm is the only place the fixtures are adopted from outside the folder that ships them |
-| a template's `Program.cs` or its dashboard | [0003](./docs/adr/0003-templates-serve-the-dashboard-only-in-development.md), the dashboard and the demo key exist only in Development |
+| a template's `Program.cs` or its console | [0003](./docs/adr/0003-templates-serve-the-dashboard-only-in-development.md), the console and the demo keys exist only in Development |
 | a template's package versions | [0004](./docs/adr/0004-the-template-package-carries-its-package-versions.md), versions are generated at pack, Trax's from the release version and the rest from the root pins |
 | the README's feature-coverage table, or a new or retired sample | [0006](./docs/adr/0006-one-sample-per-major-feature-proven-end-to-end.md), one sample per major feature, each proven by E2E tests; a feature without a sample is proven upstream and listed in the table |
 | `docker-compose.yml` | [0005](./docs/adr/0005-sample-infrastructure-listens-on-loopback-only.md), every published port binds `127.0.0.1` because the credentials sit beside it |
@@ -53,8 +53,8 @@ not to record. The format is
 
 ## Guards
 
-`tests/Trax.Samples.Tests.Meta/` holds twenty-two convention guards. Eleven are shared with other
-folders, and eleven are this folder's own. `E2EDatabaseProvisioningTests` reads the root CI workflow
+`tests/Trax.Samples.Tests.Meta/` holds twenty-three convention guards. Eleven are shared with other
+folders, and twelve are this folder's own. `E2EDatabaseProvisioningTests` reads the root CI workflow
 and `.github/ci/packages.json`, checking every sample factory's *default* connection string
 against the ports and databases CI actually creates; a factory that declares none, because its sample runs on SQLite or the
 in-memory provider or reads the connection from configuration, gives it nothing to check.
@@ -73,6 +73,19 @@ uses. `SamplePortsTests` keeps every sample port in 5200-5299 or 5310-5319 and o
 `AsyncAssertionsAreAwaitedTests` refuses an async assertion whose Task is dropped unawaited.
 `PlaywrightVersionTests` keeps the `Microsoft.Playwright` pin equal to the screenshot script's
 Playwright, so the browser tests and the script download one browser build (central ADR `0049`).
+`SuitesRunOnceTests` keeps every project CI runs in a job of its own (a suite in
+`.github/ci/packages.json`) out of this folder's job, so its tests run once.
+
+`tests/Trax.Samples.ApiDashboard.Browser/` drives the operations console in chromium. CI runs it in
+its own job, `console-browser`, whenever Trax.Api or anything upstream changes, or the project
+does; this folder's job leaves it out. Locally: `trax-test console-browser`. A test there derives from
+`Fixtures/ConsoleTest` (whose teardown fails it on a console error, a CSP violation, an off-origin request or
+document text sent to a host that requires persisted operations), seeds the state it needs through
+`Fixtures/Seed`, signs in as one of `Fixtures/Caller`, and reads the page through the page objects in `Pages/`.
+Each test names what it drives with `[Covers("route:/runs/:id")]`, `[Covers("mutation:RequeueDeadLetter")]` or
+`[Covers("subscription:OnJunctionEvent")]`; `Tests/ConsoleCoverageTests` fails on a route in `ClientApp/src/AppRoutes.tsx`
+or a mutation or subscription the console sends that no test names, and on a name that no longer exists. What no page
+can drive goes in its exclusion list, with the reason.
 
 `tests/Trax.Samples.Recovery.Browser/` drives the Recovery page in chromium with Playwright for .NET.
 It builds the page with vite, so it needs `npm ci` in the page's folder and in

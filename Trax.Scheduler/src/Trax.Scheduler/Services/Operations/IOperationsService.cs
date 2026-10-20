@@ -496,6 +496,29 @@ public interface IOperationsService
     ) => throw NotImplementedBy(nameof(GetManifestGroupExecutionStatsAsync));
 
     /// <summary>
+    /// When each of the given manifests runs next, and its schedule in plain words, one row per
+    /// distinct id that names a manifest, in the order given. The times come from the manifest
+    /// manager's own due-ness check, exclusion windows and misfire policy included, so they are
+    /// the times the manager will find each manifest due, assuming each run succeeds when it is
+    /// due (a retry's backoff and a variance's jitter after the next run are not shown). Batched
+    /// so a list page reads its visible manifests in one call.
+    /// </summary>
+    /// <param name="manifestIds">The manifests, at most <c>OperationsService.MaxBatchSize</c>.</param>
+    /// <param name="count">
+    /// How many times to list per manifest, clamped to 0 through
+    /// <c>OperationsService.MaxUpcomingRuns</c>.
+    /// </param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// More than <c>OperationsService.MaxBatchSize</c> distinct ids.
+    /// </exception>
+    Task<IReadOnlyList<ManifestUpcomingRuns>> GetUpcomingRunsAsync(
+        IReadOnlyCollection<long> manifestIds,
+        int count,
+        CancellationToken ct
+    ) => throw NotImplementedBy(nameof(GetUpcomingRunsAsync));
+
+    /// <summary>
     /// A page of log entries, filtered by run, minimum level, exact category, and text the message
     /// or the category contains, newest first unless <see cref="LogQuery.Order"/> says oldest
     /// first. Pages by keyset when <see cref="LogQuery.AfterId"/> is set, in the chosen order,
@@ -648,6 +671,28 @@ public interface IOperationsService
     ) => throw NotImplementedBy(nameof(GetMachineInstanceRunsAsync));
 
     /// <summary>
+    /// One page of a state-machine instance's history, newest first: one transition for every snapshot write
+    /// Trax recorded (its creation, each command, save, timer and run outcome), with who made it, the states it moved
+    /// between, when, and the run or child machine it started; or <c>null</c> when no row matches
+    /// <paramref name="key"/>. Never the instance's context or its owner's key. The history is the row's
+    /// (<see cref="MachineInstanceKey.RowId"/>), so a user's draft shows only its own. The dashboard's instance page
+    /// and the API's <c>machineInstance { transitions }</c> both read it here.
+    /// </summary>
+    /// <param name="key">The instance, named as for <see cref="GetMachineInstanceAsync"/>.</param>
+    /// <param name="beforeRevision">Only transitions older than this revision (a page's <c>NextCursor</c>); null starts at the newest.</param>
+    /// <param name="take">The page size, clamped to 1 through <c>OperationsService.MaxPageSize</c>.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="key"/> names a user's draft without a row id, or names no machine.
+    /// </exception>
+    Task<MachineInstanceTransitionPage?> GetMachineInstanceTransitionsAsync(
+        MachineInstanceKey key,
+        long? beforeRevision,
+        int take,
+        CancellationToken ct
+    ) => throw NotImplementedBy(nameof(GetMachineInstanceTransitionsAsync));
+
+    /// <summary>
     /// The live feed of state-machine instances as an operator reads them: each instance once
     /// whenever it is written, by any path on any host, with its state, revision and whether it
     /// waits on a run it invoked, and once more with <see cref="MachineInstanceRecord.Deleted"/>
@@ -695,6 +740,57 @@ public interface IOperationsService
         MachineInstanceKey key,
         CancellationToken ct
     ) => throw NotImplementedBy(nameof(CancelMachineInstanceAsync));
+
+    /// <summary>
+    /// Finds what <paramref name="text"/> names, when the caller does not know what kind of id it
+    /// holds: a run (by id or external id), a manifest (by id, external id or name), a work queue
+    /// entry (by id, external id or subject key), a dead letter (by id), a state-machine instance
+    /// (by its GUID) or a registered train (by its full or friendly name). The console's global
+    /// search calls it, through the API's <c>operations.lookup</c>.
+    /// </summary>
+    /// <remarks>
+    /// Exact matches only, after trimming, each read through an index, at most
+    /// <see cref="OperationsService.LookupMatchCap"/> of each kind. A subject key finds the entries
+    /// still queued or dispatched under it. An instance is named as the operator's list names it,
+    /// by machine, owner kind, id, row id and state, never by its context or whose a user's draft
+    /// is. Empty for empty text and for text longer than <see cref="OperationsService.LookupTextLimit"/>.
+    /// </remarks>
+    /// <param name="text">The id, key or name to look up.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="NotSupportedException">The implementation predates this method.</exception>
+    Task<IReadOnlyList<LookupMatch>> LookupAsync(string text, CancellationToken ct) =>
+        throw NotImplementedBy(nameof(LookupAsync));
+
+    /// <summary>
+    /// Every state machine this host registers, ordered by name, whether or not it has any
+    /// instances: its version and its graph (states, transitions with what takes each and its
+    /// guard, timers, the train each state invokes and the machine each spawns), read from its IR
+    /// by the same reading <c>trax machine show</c> draws it from. A machine declared with C#
+    /// delegates has no IR; it is listed with why it has no graph. The console's Machines page and
+    /// the API's <c>operations.machines</c> both read it here.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    Task<IReadOnlyList<MachineDescription>> GetMachinesAsync(CancellationToken ct) =>
+        throw NotImplementedBy(nameof(GetMachinesAsync));
+
+    /// <summary>
+    /// What needs an operator's attention, in one read: whether the manifest manager and the job
+    /// dispatcher are switched on, the dead letters awaiting intervention grouped by train and
+    /// reason, the trains failing more in the last hour than over the week before it, the stuck
+    /// state-machine instances by machine and state, the queue backlog and its oldest entry's
+    /// age, and the hosts that have stopped beating. Each entry carries the console path and
+    /// query that lists it. The console's Overview and the API's <c>operations.attention</c> both
+    /// read it here.
+    /// </summary>
+    /// <remarks>
+    /// Each list holds at most <see cref="OperationsService.AttentionListCap"/> entries, largest
+    /// or worst first. A stuck instance is one <see cref="MachineInstanceRecord.Stuck"/> calls
+    /// stuck; an offline host is one whose last beat is three beats old.
+    /// </remarks>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="NotSupportedException">The implementation predates this method.</exception>
+    Task<Attention> GetAttentionAsync(CancellationToken ct) =>
+        throw NotImplementedBy(nameof(GetAttentionAsync));
 
     private NotSupportedException NotImplementedBy(string member) =>
         new(
@@ -790,6 +886,29 @@ public interface IOperationsService
         bool hideAdminTrains,
         CancellationToken ct
     );
+
+    /// <summary>
+    /// Runs over time for one train, manifest or group: for each bucket of the range, how many
+    /// runs started in it that completed, failed or were cancelled, and the median and 95th
+    /// percentile duration of the completed ones. Every bucket is returned, oldest first, empty
+    /// ones included.
+    /// </summary>
+    /// <param name="scope">What the runs are of.</param>
+    /// <param name="id">The manifest's or group's id; ignored for a train.</param>
+    /// <param name="name">The train's interface FullName; ignored for a manifest or group.</param>
+    /// <param name="range">The window, which sets the bucket size.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ArgumentException">
+    /// A train scope without a name, a manifest or group scope without an id, or a range the
+    /// scope refuses (<c>OperationsService.MetricSeriesRefusal</c> says which).
+    /// </exception>
+    Task<MetricSeries> GetMetricSeriesAsync(
+        MetricSeriesScope scope,
+        long? id,
+        string? name,
+        MetricSeriesRange range,
+        CancellationToken ct
+    ) => throw NotImplementedBy(nameof(GetMetricSeriesAsync));
 
     /// <summary>
     /// Returns a snapshot of host-process health: working set, GC heap, uptime, and

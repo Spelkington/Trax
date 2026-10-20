@@ -228,7 +228,10 @@ export interface WorkQueueDetail extends WorkQueueSummary {
 export interface DeadLetterSummary {
   id: number;
   manifestId: number;
+  // The train the manifest runs (its FullName), despite the name.
   manifestName: string;
+  // The manifest's own name, its external id; absent from rows read before the field existed.
+  manifestExternalId?: string | null;
   status: DeadLetterStatus;
   deadLetteredAt: string;
   reason: string;
@@ -298,6 +301,8 @@ export interface DependencyGraphNode {
   id: number;
   name: string;
   isHighlighted: boolean;
+  /** Absent from an answer recorded before the field existed. */
+  isEnabled?: boolean;
 }
 
 export interface DependencyGraphEdge {
@@ -313,10 +318,16 @@ export interface ManifestGroupDependencyGraph {
 // A process (host instance) that has executed trains. Backs the cluster page.
 export interface HostInfo {
   instanceId: string;
-  name: string | null;
-  environment: string | null;
-  lastSeen: string;
-  totalExecutions: number;
+  name: string;
+  environment: string;
+  traxVersion: string;
+  startedAt: string;
+  lastHeartbeat: string;
+  online: boolean;
+  runsDispatcher: boolean;
+  runsManifestManager: boolean;
+  workerSlots: number | null;
+  workerSlotsInUse: number | null;
   currentlyRunning: number;
 }
 
@@ -356,6 +367,34 @@ export interface ManifestGroupStats {
   failed: number;
   inProgress: number;
   lastRun: string | null;
+  lastEndedRunFailed?: boolean;
+}
+
+/** When a manifest runs next and its schedule in words (operations.manifests / manifestDetail). */
+export interface ManifestSchedule {
+  id: number;
+  scheduleText: string;
+  nextRuns: string[];
+}
+
+export type MetricSeriesRange = "LAST_HOUR" | "LAST24_HOURS" | "LAST7_DAYS";
+
+export interface MetricSeriesBucket {
+  start: string;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  p50DurationMs: number | null;
+  p95DurationMs: number | null;
+}
+
+export interface MetricSeries {
+  scope: "TRAIN" | "MANIFEST" | "GROUP";
+  range: MetricSeriesRange;
+  from: string;
+  to: string;
+  bucketSeconds: number;
+  buckets: MetricSeriesBucket[];
 }
 
 export type ExclusionType =
@@ -667,7 +706,25 @@ export type RunNodeState =
   | "INTERRUPTED";
 
 // The steps a node recorded, as far as the run graph draws them.
-export type RunGraphStep = Pick<JunctionStep, "state" | "failureClass" | "failureException">;
+export type RunGraphStep = Pick<
+  JunctionStep,
+  | "position"
+  | "kind"
+  | "name"
+  | "nameWithheld"
+  | "state"
+  | "startedAt"
+  | "durationMs"
+  | "attempt"
+  | "failureClass"
+  | "failureException"
+  | "questionKey"
+  | "answer"
+  | "answerWithheld"
+  | "confidence"
+  | "decider"
+  | "replayed"
+>;
 
 // One declared step of a run's train, with where the run left it (operations.runGraph). A node
 // says whether a checkpoint is stored at it and whether resumeExecution can resume there; never
@@ -675,6 +732,11 @@ export type RunGraphStep = Pick<JunctionStep, "state" | "failureClass" | "failur
 export interface RunGraphNode {
   id: string;
   kind: ChainStepKind;
+  // The junction or decider the step names, and the types it takes from and adds to Memory; null
+  // where the step names none. Types only: what a step read or wrote is never recorded.
+  junction: string | null;
+  in: string | null;
+  out: string | null;
   opaque: boolean;
   replayed: boolean;
   checkpointed: boolean;
@@ -709,6 +771,9 @@ export interface RunGraphFlatNode extends Omit<RunGraphNode, "tracks"> {
 export interface RunGraph {
   metadataId: number;
   hasGraph: boolean;
+  // True when the run recorded its chain's hash when it started and the chain the host declares now
+  // has another: the graph is drawn on today's chain, which may not be the one the run ran.
+  chainChanged: boolean;
   moreSteps: boolean;
   // True when resumeExecution can resume the run after its latest checkpoint.
   canResume: boolean;
@@ -717,9 +782,84 @@ export interface RunGraph {
   unmatchedSteps: Pick<JunctionStep, "position" | "name" | "nameWithheld" | "state">[];
 }
 
+// One node of a train's declared chain (operations.trains { chain }): the run graph's node with no
+// run, so every one is NOT_REACHED and has no steps.
+export interface TrainChainNode {
+  id: string;
+  kind: ChainStepKind;
+  junction: string | null;
+  opaque: boolean;
+  state: RunNodeState;
+  parentId: string | null;
+  track: string | null;
+  depth: number;
+  tracks: RunGraphTrackHead[];
+}
+
+// A train's declared chain and whether it asks a decider (TRAIN_CHAINS). hasGraph is false when the
+// host cannot read the train's chain.
+export interface TrainChain {
+  fullName: string;
+  asksDecisions: boolean;
+  chain: { train: string; hasGraph: boolean; allNodes: TrainChainNode[] };
+}
+
 // ── State machines ─────────────────────────────────────────────────────────
 // An instance as operators see it: never its context, never whose a user's draft is.
 export type SnapshotOwnerKind = "SYSTEM" | "USER";
+
+// The machine instance whose invoking state queued a run (RUN_LINKS). Never whose a user's draft
+// is; rowId is set while the instance still waits on the run.
+export interface RunInvoker {
+  machine: string;
+  instanceId: string;
+  ownerKind: SnapshotOwnerKind;
+  rowId: number | null;
+}
+
+// One thing operations.lookup found (LOOKUP): which page it opens, by kind and id.
+export type LookupKind = "RUN" | "MANIFEST" | "WORK_QUEUE_ENTRY" | "DEAD_LETTER" | "MACHINE_INSTANCE" | "TRAIN";
+
+export interface LookupMatch {
+  kind: LookupKind;
+  id: string;
+  label: string;
+  matchedOn: "id" | "externalId" | "name" | "subjectKey";
+  machine: string | null;
+  ownerKind: SnapshotOwnerKind | null;
+  rowId: number | null;
+}
+
+// What needs attention (ATTENTION). Each entry's link is a console path with its list's filter.
+export interface Attention {
+  asOf: string;
+  scheduler: { manifestManagerEnabled: boolean; jobDispatcherEnabled: boolean; paused: boolean; link: string };
+  deadLetters: { trainName: string; reason: string; count: number; oldestDeadLetteredAt: string; link: string }[];
+  failingTrains: {
+    trainName: string;
+    failedLastHour: number;
+    finishedLastHour: number;
+    lastHourFailureRate: number;
+    baselineFailureRate: number;
+    link: string;
+  }[];
+  stuckInstances: { machine: string; state: string; count: number; link: string }[];
+  queue: { queued: number; oldestQueuedAt: string | null; oldestAgeSeconds: number | null; link: string };
+  offlineHosts: { instanceId: string; hostName: string; lastHeartbeatAt: string; runsDispatcher: boolean; link: string }[];
+}
+
+// What a run is linked to (RUN_LINKS).
+export interface RunLinks {
+  id: number;
+  manifestId: number | null;
+  parentId: number | null;
+  childCount: number;
+  replayDecisionsOf: number | null;
+  resumeFrom: number | null;
+  workQueueEntryId: number | null;
+  deadLetterId: number | null;
+  invokedBy: RunInvoker | null;
+}
 
 export interface MachineInstance {
   machine: string;
@@ -741,6 +881,88 @@ export interface MachineInstanceCount {
   count: number;
 }
 
+/** A count by state with how many of them are stuck (MACHINE_INSTANCE_STUCK_COUNTS). */
+export interface MachineInstanceStuckCount extends MachineInstanceCount {
+  stuck: number;
+}
+
+/** The run an instance's state waits on, and where that run is. */
+export interface MachineInstanceWaitingRun {
+  // Null while the run is still queued and has no run id yet.
+  executionId: number | null;
+  // PENDING while queued, CANCELLED when its entry was cancelled; null when neither is found.
+  trainState: TrainState | null;
+  workQueueEntryId: number | null;
+}
+
+/** What says an instance needs attention (MACHINE_INSTANCES_ATTENTION and MACHINE_INSTANCE). */
+export interface MachineInstanceAttention {
+  // When its state's timer fires; null when that state has no timer.
+  dueAt: string | null;
+  // The timer is past due by more than the host's poll: it has not fired.
+  overdue: boolean;
+  waitingOn: MachineInstanceWaitingRun | null;
+  // When it last changed, until a transition log exists; show it as "last changed".
+  inStateSince: string;
+  // Overdue, or waiting on a run that failed or was cancelled.
+  stuck: boolean;
+}
+
+export type MachineInstanceAttentionRow = Pick<
+  MachineInstance,
+  "machine" | "ownerKind" | "id" | "rowId" | "state" | "updatedAt"
+> &
+  MachineInstanceAttention;
+
+export type MachineTransitionKind = "COMMAND" | "TIMER" | "OUTCOME";
+
+export interface MachineDefinitionState {
+  name: string;
+  isInitial: boolean;
+  isFinal: boolean;
+  isCommitted: boolean;
+  // The train the state invokes on entry (its interface's full name).
+  invokesTrain: string | null;
+  // The machine the state spawns on entry.
+  spawnsMachine: string | null;
+}
+
+export interface MachineDefinitionTransition {
+  from: string;
+  // A command's name, the timer's trigger, or an outcome trigger ("Building.done").
+  command: string;
+  to: string;
+  kind: MachineTransitionKind;
+  guard: string | null;
+  effect: string | null;
+  // For a timer: ISO-8601, or a context field with its bounds.
+  after: string | null;
+}
+
+export interface MachineDefinitionTimer {
+  state: string;
+  command: string;
+  target: string;
+  after: string | null;
+  field: string | null;
+  min: string | null;
+  max: string | null;
+}
+
+/** A machine the host registers (operations.machines), with or without instances. */
+export interface MachineDefinition {
+  name: string;
+  version: number;
+  systemOwned: boolean;
+  schemaHash: string | null;
+  initialState: string | null;
+  // Why it has no graph; null when it has one.
+  graphUnavailableReason: string | null;
+  states: MachineDefinitionState[];
+  transitions: MachineDefinitionTransition[];
+  timers: MachineDefinitionTimer[];
+}
+
 export interface MachineInstanceInvokedRun {
   id: number;
   externalId: string;
@@ -754,12 +976,54 @@ export interface MachineInstanceInvokedRun {
   isLive: boolean;
 }
 
-export interface MachineInstanceDetail extends MachineInstance {
+export interface MachineInstanceDetail extends MachineInstance, MachineInstanceAttention {
   invokedRuns: MachineInstanceInvokedRun[];
   // The instance invoked more runs than the newest 50 listed.
   isInvokedRunsCapped: boolean;
   // The work queue entry of the run its state waits on, while that run is still queued.
   queuedInvokedRunEntryId: number | null;
+}
+
+/** One event of onMachineInstanceChanged: an instance as it was just written, never its context. */
+export interface MachineInstanceChange {
+  rowId: number;
+  machine: string;
+  ownerKind: SnapshotOwnerKind;
+  id: string;
+  state: string;
+  updatedAt: string;
+  hasLiveInvokedRun: boolean;
+  revision: number | null;
+  // The instance was deleted or expired; nothing follows for this row.
+  deleted: boolean;
+  // Writes may have been missed: the event names no instance, and the page reads again.
+  reload: boolean;
+}
+
+/** What wrote one row of an instance's history (`SnapshotTransitionKind`). */
+export type SnapshotTransitionKind = "START" | "COMMAND" | "SAVE" | "TIMER" | "OUTCOME";
+
+/** Who made one transition: the owner, host code, or the machine itself. Never which user. */
+export type SnapshotTransitionActor = "OWNER" | "HOST" | "MACHINE";
+
+/** One transition in an instance's history, as `machineInstance { transitions }` serves it. */
+export interface MachineInstanceTransition {
+  revision: number;
+  kind: SnapshotTransitionKind;
+  trigger: string | null;
+  actor: SnapshotTransitionActor;
+  fromState: string | null;
+  toState: string;
+  at: string;
+  previousAt: string | null;
+  startedRun: { executionId: number | null; trainState: TrainState | null; workQueueEntryId: number | null } | null;
+  startedChild: { machine: string; ownerKind: SnapshotOwnerKind; id: string; rowId: number } | null;
+}
+
+/** A page of an instance's history, newest first; `nextCursor` is the next page's `after`. */
+export interface MachineInstanceTransitions {
+  items: MachineInstanceTransition[];
+  nextCursor: number | null;
 }
 
 export type MachineInstanceCancelOutcome =

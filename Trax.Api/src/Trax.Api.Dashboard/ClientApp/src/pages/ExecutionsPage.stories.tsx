@@ -4,21 +4,21 @@ import { expect, userEvent, waitFor, within } from "storybook/test";
 import { ExecutionsPage } from "./ExecutionsPage";
 import { emptyPage, errorOverride, executionScenario } from "../mock/scenarios";
 import { USER_OWNED_RUN_CANCEL_REFUSAL, userDraftRunsOverlay } from "../mock/store/overlays";
+import { setAutoConfirm } from "../lib/confirm";
 
 const meta = {
   title: "Pages/Executions",
   component: ExecutionsPage,
-  parameters: { route: "/executions", mock: executionScenario },
+  parameters: { route: "/runs", mock: executionScenario },
 } satisfies Meta<typeof ExecutionsPage>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
 function acceptConfirm() {
-  const original = window.confirm;
-  window.confirm = () => true;
+  setAutoConfirm(true);
   return () => {
-    window.confirm = original;
+    setAutoConfirm(null);
   };
 }
 
@@ -53,9 +53,11 @@ export const SortOldest: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByText("AlphaJob")).toBeInTheDocument());
-    expect(c.getAllByRole("link")[0]).toHaveTextContent("AlphaJob"); // newest first
+    // The first row's first link is its train.
+    const firstTrain = () => within(c.getByRole("table")).getAllByRole("link")[0];
+    expect(firstTrain()).toHaveTextContent("AlphaJob"); // newest first
     await userEvent.selectOptions(c.getAllByRole("combobox")[1], "OLDEST");
-    await waitFor(() => expect(c.getAllByRole("link")[0]).toHaveTextContent("GammaJob"));
+    await waitFor(() => expect(firstTrain()).toHaveTextContent("GammaJob"));
   },
 };
 
@@ -118,7 +120,7 @@ export const FilterYieldsEmpty: Story = {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByText("AlphaJob")).toBeInTheDocument());
     await userEvent.selectOptions(c.getAllByRole("combobox")[0], "PENDING");
-    await waitFor(() => expect(c.getByText("No executions.")).toBeInTheDocument());
+    await waitFor(() => expect(c.getByText("No runs.")).toBeInTheDocument());
   },
 };
 
@@ -161,10 +163,13 @@ export const DurationFormatting: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByText("AlphaJob")).toBeInTheDocument());
-    const alpha = c.getByText("AlphaJob").closest("tr") as HTMLElement;
-    expect(within(alpha).getByText("12.0 s")).toBeInTheDocument(); // COMPLETED, 12s
-    const gamma = c.getByText("GammaJob").closest("tr") as HTMLElement;
-    expect(within(gamma).getByText("—")).toBeInTheDocument(); // IN_PROGRESS, no end time
+    const column = within(c.getByRole("table"))
+      .getAllByRole("columnheader")
+      .findIndex((h) => h.textContent === "Duration");
+    const duration = (train: string) =>
+      within(c.getByText(train).closest("tr") as HTMLElement).getAllByRole("cell")[column];
+    expect(duration("AlphaJob")).toHaveTextContent("12.0 s"); // COMPLETED, 12s
+    expect(duration("GammaJob")).toHaveTextContent("—"); // IN_PROGRESS, no end time
   },
 };
 
@@ -209,7 +214,7 @@ export const Empty: Story = {
   parameters: { mock: emptyPage("OperationsQueries", "executions") },
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
-    await waitFor(() => expect(c.getByText("No executions.")).toBeInTheDocument());
+    await waitFor(() => expect(c.getByText("No runs.")).toBeInTheDocument());
   },
 };
 
@@ -238,7 +243,7 @@ export const FailureClassYieldsEmpty: Story = {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByText("AlphaJob")).toBeInTheDocument());
     await userEvent.selectOptions(c.getByLabelText("Failure class"), "PERMANENT");
-    await waitFor(() => expect(c.getByText("No executions.")).toBeInTheDocument());
+    await waitFor(() => expect(c.getByText("No runs.")).toBeInTheDocument());
   },
 };
 
@@ -292,7 +297,7 @@ export const ExactFilterYieldsEmpty: Story = {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByText("AlphaJob")).toBeInTheDocument());
     await userEvent.type(c.getByLabelText("Host name"), "no-such-host");
-    await waitFor(() => expect(c.getByText("No executions.")).toBeInTheDocument());
+    await waitFor(() => expect(c.getByText("No runs.")).toBeInTheDocument());
   },
 };
 
@@ -303,10 +308,25 @@ export const ParentAndRunningJunctionColumns: Story = {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByText("BetaJob")).toBeInTheDocument());
     const beta = c.getByText("BetaJob").closest("tr") as HTMLElement;
-    expect(within(beta).getByRole("link", { name: "#800" })).toHaveAttribute("href", "/executions/800");
+    expect(within(beta).getByRole("link", { name: "#800" })).toHaveAttribute("href", "/runs/800");
     const gamma = c.getByText("GammaJob").closest("tr") as HTMLElement;
     expect(within(gamma).getByText("ProcessStep")).toBeInTheDocument();
     const alpha = c.getByText("AlphaJob").closest("tr") as HTMLElement;
     expect(within(alpha).queryByText("ProcessStep")).not.toBeInTheDocument();
+  },
+};
+
+// The Failed view: the same list filtered to state FAILED, with where and why each run failed.
+export const FailedView: Story = {
+  parameters: { route: "/runs?state=FAILED" },
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    await waitFor(() => expect(c.getByText("BetaJob")).toBeInTheDocument());
+    expect(c.getByRole("heading", { name: "Failed runs" })).toBeInTheDocument();
+    expect(c.getByRole("link", { name: "Failed" })).toHaveAttribute("aria-current", "page");
+    const beta = c.getByText("BetaJob").closest("tr") as HTMLElement;
+    expect(within(beta).getByText("ValidateStep")).toBeInTheDocument();
+    expect(within(beta).getByText("Assertion failed")).toBeInTheDocument();
+    expect(c.queryByText("AlphaJob")).not.toBeInTheDocument();
   },
 };

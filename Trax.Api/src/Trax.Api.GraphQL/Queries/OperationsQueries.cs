@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Trax.Api.DTOs;
 using Trax.Api.GraphQL.Validation;
 using Trax.Api.Services.HealthCheck;
+using Trax.Api.Services.Lists;
 using Trax.Api.Services.Runs;
 using Trax.Core.Exceptions;
 using Trax.Effect.Configuration.TraxEffectConfiguration;
@@ -22,6 +23,7 @@ using Trax.Mediator.Services.TrainDiscovery;
 using Trax.Scheduler.Configuration;
 using Trax.Scheduler.Services.Effects;
 using Trax.Scheduler.Services.Operations;
+using HostHeartbeatRow = Trax.Effect.Models.HostHeartbeat.HostHeartbeat;
 using ManifestExecutionStats = Trax.Api.DTOs.ManifestExecutionStats;
 
 namespace Trax.Api.GraphQL.Queries;
@@ -343,25 +345,18 @@ public partial class OperationsQueries
             .Manifests.AsNoTracking()
             .OrderByDescending(m => m.Id);
 
-        if (isEnabled.HasValue)
-            baseQuery = baseQuery.Where(m => m.IsEnabled == isEnabled.Value);
-        if (scheduleType.HasValue)
-            baseQuery = baseQuery.Where(m => m.ScheduleType == scheduleType.Value);
-        if (!string.IsNullOrWhiteSpace(nameContains))
-            baseQuery = baseQuery.Where(m => m.Name.Contains(nameContains));
-        if (manifestGroupId.HasValue)
-            baseQuery = baseQuery.Where(m => m.ManifestGroupId == manifestGroupId.Value);
-        // A manifest's Name is its train's interface FullName, the form AdminTrains.FullNames
-        // holds; the dashboard's manifests page hides the same rows.
-        if (hideAdminTrains)
-            baseQuery = baseQuery.Where(m => !AdminTrains.FullNames.Contains(m.Name));
-
-        var hasFilter =
-            isEnabled.HasValue
-            || scheduleType.HasValue
-            || !string.IsNullOrWhiteSpace(nameContains)
-            || manifestGroupId.HasValue
-            || hideAdminTrains;
+        var filter = new BulkManifestFilter
+        {
+            IsEnabled = isEnabled,
+            ScheduleType = scheduleType,
+            NameContains = nameContains,
+            ManifestGroupId = manifestGroupId,
+            HideAdminTrains = hideAdminTrains,
+        };
+        // The filter a bulk operation over this list applies too (ListFilters). The dashboard's
+        // manifests page hides the admin trains' rows the same way.
+        baseQuery = ListFilters.Manifests(baseQuery, filter);
+        var hasFilter = ListFilters.Narrows(filter);
 
         // A filtered total is exact; an unfiltered one may be estimated. The cursor never
         // changes it: totalCount is the size of the whole list, whichever page this is.
@@ -547,50 +542,61 @@ public partial class OperationsQueries
     }
 
     /// <summary>
-    /// The processes that have executed trains, rolled up from the recorded executions by
-    /// <c>HostInstanceId</c>: last-seen, total executions, and how many are still running. Backs the
-    /// dashboard's cluster view. It aggregates over every recorded execution (like the dashboard
-    /// metrics), so it is meant for occasional refresh, not a hot poll.
+    /// The host processes that have beaten in the last day, from <c>trax.host_heartbeat</c>: each
+    /// one's identity, Trax version, start, last heartbeat, whether it is online, what it runs, and
+    /// how many runs it has in progress. Every host with a data provider beats every 15 seconds
+    /// whether or not it has work, and one is offline once three beats are missed (45 seconds).
+    /// Online hosts come first, then by name.
     /// </summary>
+    /// <param name="dataContextFactory">Resolved from DI; not a GraphQL argument.</param>
+    /// <param name="ct">The request's cancellation token.</param>
+    /// <param name="timeProvider">The clock <c>online</c> is judged by; resolved from DI, the system clock when absent.</param>
     public async Task<IReadOnlyList<HostInfo>> GetHosts(
         [Service] IDataContextProviderFactory dataContextFactory,
-        CancellationToken ct
+        CancellationToken ct,
+        [Service] TimeProvider? timeProvider = null
     )
     {
+        var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
         using var db = await dataContextFactory.CreateDbContextAsync(ct);
 
-        // Aggregate into an anonymous shape first: a filtered COUNT and a DTO constructor inside a
-        // GroupBy projection don't translate, but SUM(CASE ...) does. Order and map to HostInfo
-        // client-side (the host list is tiny).
-        var rows = await db
-            .Metadatas.AsNoTracking()
-            .Where(m => m.HostInstanceId != null)
-            .GroupBy(m => new
-            {
-                m.HostInstanceId,
-                m.HostName,
-                m.HostEnvironment,
-            })
-            .Select(g => new
-            {
-                g.Key.HostInstanceId,
-                g.Key.HostName,
-                g.Key.HostEnvironment,
-                LastSeen = g.Max(m => m.StartTime),
-                Total = g.LongCount(),
-                Running = g.Sum(m => m.TrainState == TrainState.InProgress ? 1 : 0),
-            })
-            .ToListAsync(ct);
+        // One row per process seen in the last day, pruned by every beat, so the table is small.
+        var beats = await db.HostHeartbeats.AsNoTracking().ToListAsync(ct);
+        if (beats.Count == 0)
+            return [];
 
-        return rows.OrderByDescending(r => r.LastSeen)
-            .Select(r => new HostInfo(
-                r.HostInstanceId!,
-                r.HostName,
-                r.HostEnvironment,
-                r.LastSeen,
-                r.Total,
-                r.Running
+        // Runs in progress are few, and the partial index on in-progress runs finds them, so this
+        // stays cheap however many runs a host has finished.
+        var ids = beats.Select(b => b.InstanceId).ToList();
+        var running = await db
+            .Metadatas.AsNoTracking()
+            .Where(m =>
+                m.TrainState == TrainState.InProgress
+                && m.HostInstanceId != null
+                && ids.Contains(m.HostInstanceId)
+            )
+            .GroupBy(m => m.HostInstanceId!)
+            .Select(g => new { InstanceId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(r => r.InstanceId, r => r.Count, ct);
+
+        return beats
+            .Select(b => new HostInfo(
+                b.InstanceId,
+                b.HostName,
+                b.HostEnvironment,
+                b.TraxVersion,
+                DateTime.SpecifyKind(b.StartedAt, DateTimeKind.Utc),
+                DateTime.SpecifyKind(b.LastHeartbeatAt, DateTimeKind.Utc),
+                HostHeartbeatRow.IsOnline(b.LastHeartbeatAt, now),
+                b.RunsDispatcher,
+                b.RunsManifestManager,
+                b.WorkerSlots,
+                b.WorkerSlotsInUse,
+                running.GetValueOrDefault(b.InstanceId)
             ))
+            .OrderByDescending(h => h.Online)
+            .ThenBy(h => h.Name, StringComparer.Ordinal)
+            .ThenBy(h => h.InstanceId, StringComparer.Ordinal)
             .ToList();
     }
 
@@ -655,72 +661,27 @@ public partial class OperationsQueries
 
         using var db = await dataContextFactory.CreateDbContextAsync(ct);
 
-        IQueryable<Effect.Models.Metadata.Metadata> filtered = db.Metadatas.AsNoTracking();
-
-        if (trainState.HasValue)
-            filtered = filtered.Where(m => m.TrainState == trainState.Value);
-        if (failureClass.HasValue)
-            filtered = filtered.Where(m => m.FailureClass == failureClass.Value);
-        if (!string.IsNullOrWhiteSpace(trainName))
-            filtered = filtered.Where(m => m.Name == trainName);
-        // metadata.Name stores the interface FullName (per CLAUDE.md), which is what
-        // AdminTrains.FullNames holds. EF translates the list Contains to a SQL IN.
-        if (hideAdminTrains)
-            filtered = filtered.Where(m => !AdminTrains.FullNames.Contains(m.Name));
-        if (startedAfter.HasValue)
-            filtered = filtered.Where(m => m.StartTime >= startedAfter.Value);
-        if (startedBefore.HasValue)
-            filtered = filtered.Where(m => m.StartTime <= startedBefore.Value);
-        if (manifestId.HasValue)
-            filtered = filtered.Where(m => m.ManifestId == manifestId.Value);
-        // Each of these three seeks an index of its own: ix_metadata_external_id,
-        // ix_metadata_parent_id and ix_metadata_host_name.
-        if (!string.IsNullOrWhiteSpace(externalId))
-            filtered = filtered.Where(m => m.ExternalId == externalId);
-        if (parentId.HasValue)
-            filtered = filtered.Where(m => m.ParentId == parentId.Value);
-        if (!string.IsNullOrWhiteSpace(hostName))
-            filtered = filtered.Where(m => m.HostName == hostName);
-        // ix_metadata_failure_junction holds only the runs that failed, in id order under each
-        // junction, so a page of one junction's failures reads just that page.
-        if (!string.IsNullOrWhiteSpace(failureJunction))
-            filtered = filtered.Where(m => m.FailureJunction == failureJunction);
-        // Lowered, with the term's wildcards escaped: the expression
-        // ix_metadata_failure_reason_trgm is built over, so a rare term reads only its matches.
-        var textFilter = !string.IsNullOrEmpty(failureReasonContains);
-        if (textFilter)
+        var filter = new BulkExecutionFilter
         {
-            var pattern = LikePattern.Contains(failureReasonContains!);
-            filtered = filtered.Where(m =>
-                EF.Functions.Like(m.FailureReason!.ToLower(), pattern, LikePattern.Escape)
-            );
-        }
-        if (manifestGroupId.HasValue)
-        {
-            // Executions for a group = executions of any manifest in that group. The subquery
-            // stays index-friendly: manifest.manifest_group_id is indexed, and the resulting
-            // manifest ids seek ix_metadata_manifest_state on the metadata side.
-            var groupManifestIds = db
-                .Manifests.AsNoTracking()
-                .Where(mf => mf.ManifestGroupId == manifestGroupId.Value)
-                .Select(mf => (long?)mf.Id);
-            filtered = filtered.Where(m => groupManifestIds.Contains(m.ManifestId));
-        }
-
-        var hasFilter =
-            trainState.HasValue
-            || !string.IsNullOrWhiteSpace(trainName)
-            || startedAfter.HasValue
-            || startedBefore.HasValue
-            || manifestId.HasValue
-            || manifestGroupId.HasValue
-            || hideAdminTrains
-            || failureClass.HasValue
-            || !string.IsNullOrWhiteSpace(externalId)
-            || parentId.HasValue
-            || !string.IsNullOrWhiteSpace(hostName)
-            || !string.IsNullOrWhiteSpace(failureJunction)
-            || textFilter;
+            TrainState = trainState,
+            TrainName = trainName,
+            StartedAfter = startedAfter,
+            StartedBefore = startedBefore,
+            ManifestId = manifestId,
+            ManifestGroupId = manifestGroupId,
+            HideAdminTrains = hideAdminTrains,
+            FailureClass = failureClass,
+            ExternalId = externalId,
+            ParentId = parentId,
+            HostName = hostName,
+            FailureReasonContains = failureReasonContains,
+            FailureJunction = failureJunction,
+        };
+        // The filter a bulk operation over this list applies too (ListFilters), so the two match
+        // the same runs.
+        var filtered = ListFilters.Executions(db, db.Metadatas.AsNoTracking(), filter);
+        var textFilter = ListFilters.HasFailureText(filter);
+        var hasFilter = ListFilters.Narrows(filter);
 
         // A text filter counts up to FailureTextCountCap matches and no further, so a common term
         // never counts every failed run; every other filtered total is exact, and an unfiltered
@@ -878,8 +839,16 @@ public partial class OperationsQueries
 
     /// <summary>
     /// Full detail for one execution, including its input, output, stack trace and the number of
-    /// executions it started, or <c>null</c> when none has that id.
+    /// executions it started, what it is linked to (the state-machine instance that invoked it,
+    /// the work queue entry it ran from, the dead letter it retries), or <c>null</c> when none has
+    /// that id.
     /// </summary>
+    /// <remarks>
+    /// Each link is one indexed read: <c>ix_metadata_parent_id</c> for the children,
+    /// <c>ix_work_queue_metadata_id</c> for the entry, <c>ix_dead_letter_retry_metadata_id</c> for
+    /// the dead letter, and the instance's unique invoke token for its row. An invoking instance
+    /// is named by machine, id and owner kind only, as <c>machineInstances</c> names it.
+    /// </remarks>
     public async Task<ExecutionDetail?> GetExecutionDetail(
         long id,
         [Service] IDataContextProviderFactory dataContextFactory,
@@ -888,53 +857,105 @@ public partial class OperationsQueries
     {
         using var db = await dataContextFactory.CreateDbContextAsync(ct);
 
-        var detail = await db
+        var row = await db
             .Metadatas.AsNoTracking()
             .Where(m => m.Id == id)
-            .Select(m => new ExecutionDetail(
-                m.Id,
-                m.ExternalId,
-                m.Name,
-                m.TrainState,
-                m.StartTime,
-                m.EndTime,
-                m.FailureJunction,
-                m.FailureReason,
-                m.FailureException,
-                m.StackTrace,
-                m.Input,
-                m.Output,
-                m.ManifestId,
-                m.CancellationRequested,
-                m.CurrentlyRunningJunction,
-                m.JunctionStartedAt,
-                m.HostName,
-                m.HostEnvironment,
-                m.HostInstanceId,
-                // ChildCount is filled in after projection; passed explicitly only because an
-                // expression tree cannot skip to a later argument by name.
-                0,
-                m.FailureClass,
-                m.ParentId,
-                m.ScheduledTime,
-                m.Executor,
-                m.HostLabels,
-                m.ReplayDecisionsOf
-            )
+            .Select(m => new
             {
-                ReplayAbandoned = m.ReplayAbandoned,
-                ResumeFrom = m.ResumeFrom,
-                ResumeAt = m.ResumeAt,
+                Detail = new ExecutionDetail(
+                    m.Id,
+                    m.ExternalId,
+                    m.Name,
+                    m.TrainState,
+                    m.StartTime,
+                    m.EndTime,
+                    m.FailureJunction,
+                    m.FailureReason,
+                    m.FailureException,
+                    m.StackTrace,
+                    m.Input,
+                    m.Output,
+                    m.ManifestId,
+                    m.CancellationRequested,
+                    m.CurrentlyRunningJunction,
+                    m.JunctionStartedAt,
+                    m.HostName,
+                    m.HostEnvironment,
+                    m.HostInstanceId,
+                    // ChildCount is filled in after projection; passed explicitly only because an
+                    // expression tree cannot skip to a later argument by name.
+                    0,
+                    m.FailureClass,
+                    m.ParentId,
+                    m.ScheduledTime,
+                    m.Executor,
+                    m.HostLabels,
+                    m.ReplayDecisionsOf
+                )
+                {
+                    ReplayAbandoned = m.ReplayAbandoned,
+                    ResumeFrom = m.ResumeFrom,
+                    ResumeAt = m.ResumeAt,
+                },
+                m.InvokingMachine,
+                m.InvokingInstanceId,
+                m.InvokingOwnerKind,
             })
             .FirstOrDefaultAsync(ct);
 
-        if (detail is null)
+        if (row is null)
             return null;
 
         // parent_id is covered by the partial index ix_metadata_parent_id, so counting
         // children stays cheap even on the huge metadata table.
         var childCount = await db.Metadatas.AsNoTracking().CountAsync(c => c.ParentId == id, ct);
-        return detail with { ChildCount = childCount };
+
+        var entry = await db
+            .WorkQueues.AsNoTracking()
+            .Where(w => w.MetadataId == id)
+            .OrderBy(w => w.Id)
+            .Select(w => new { w.Id, w.DeadLetterId })
+            .FirstOrDefaultAsync(ct);
+
+        var deadLetterId =
+            entry?.DeadLetterId
+            ?? await db
+                .DeadLetters.AsNoTracking()
+                .Where(d => d.RetryMetadataId == id)
+                .OrderBy(d => d.Id)
+                .Select(d => (long?)d.Id)
+                .FirstOrDefaultAsync(ct);
+
+        RunInvoker? invokedBy = null;
+        if (
+            row.InvokingMachine is { } machine
+            && row.InvokingInstanceId is { } instanceId
+            && row.InvokingOwnerKind is { } ownerKind
+        )
+        {
+            // The row still waiting on this run holds its external id as its invoke token. A
+            // user's draft is found through that alone, never through who owns it.
+            var token = row.Detail.ExternalId.TrimEnd();
+            var rowId = await db
+                .SnapshotDrafts.AsNoTracking()
+                .Where(x =>
+                    x.InvokeToken == token
+                    && x.Machine == machine
+                    && x.Id == instanceId
+                    && x.OwnerKind == ownerKind
+                )
+                .Select(x => (long?)x.RowId)
+                .FirstOrDefaultAsync(ct);
+            invokedBy = new RunInvoker(machine, instanceId, ownerKind, rowId);
+        }
+
+        return row.Detail with
+        {
+            ChildCount = childCount,
+            InvokedBy = invokedBy,
+            WorkQueueEntryId = entry?.Id,
+            DeadLetterId = deadLetterId,
+        };
     }
 
     /// <summary>
@@ -1070,6 +1091,30 @@ public partial class OperationsQueries
             ct
         );
     }
+
+    /// <summary>
+    /// What an id, key or name names, when the caller does not know its kind: runs (id, external
+    /// id), manifests (id, external id, name), work queue entries (id, external id, subject key),
+    /// dead letters (id), state-machine instances (their GUID) and registered trains (full or
+    /// friendly name). Each match says its <c>kind</c> and <c>id</c>, which page it opens, a
+    /// <c>label</c>, and the field it matched on. Read through
+    /// <see cref="IOperationsService.LookupAsync"/>, the call the console's search makes.
+    /// </summary>
+    /// <remarks>
+    /// Exact matches only, after trimming; nothing matches by prefix or contents. Each read is an
+    /// indexed column, and at most 10 matches of each kind are returned. A subject key finds the
+    /// entries still queued or dispatched under it. An instance is named as
+    /// <c>machineInstances</c> names it (machine, owner kind, id, row id, state), never by its
+    /// context or whose a user's draft is. Empty for empty text or text over 512 characters.
+    /// </remarks>
+    /// <param name="text">The id, key or name to look up.</param>
+    /// <param name="operationsService">Resolved from DI; not a GraphQL argument.</param>
+    /// <param name="ct">Cancels the read.</param>
+    public Task<IReadOnlyList<LookupMatch>> GetLookup(
+        string text,
+        [Service] IOperationsService operationsService,
+        CancellationToken ct
+    ) => operationsService.LookupAsync(text, ct);
 
     // Names and enum spellings follow the options the queue and run paths deserialize input
     // with, so a client that builds its JSON from this schema writes what the reader expects.

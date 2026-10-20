@@ -3,11 +3,12 @@ import { expect, userEvent, waitFor, within } from "storybook/test";
 import { ManifestsPage } from "./ManifestsPage";
 import { emptyPage, errorOverride, manifestScenario, manifestScenarioWithRetired } from "../mock/scenarios";
 import type { StatefulOverlay } from "../mock/store/overlays";
+import { setAutoConfirm } from "../lib/confirm";
 
 const meta = {
   title: "Pages/Manifests",
   component: ManifestsPage,
-  parameters: { route: "/manifests", mock: manifestScenario },
+  parameters: { route: "/schedules", mock: manifestScenario },
 } satisfies Meta<typeof ManifestsPage>;
 
 export default meta;
@@ -16,10 +17,9 @@ type Story = StoryObj<typeof meta>;
 const badge = { selector: "span" } as const;
 
 function acceptConfirm() {
-  const original = window.confirm;
-  window.confirm = () => true;
+  setAutoConfirm(true);
   return () => {
-    window.confirm = original;
+    setAutoConfirm(null);
   };
 }
 
@@ -47,7 +47,7 @@ export const TriggerManifest: Story = {
     try {
       await waitFor(() => expect(c.getByText("OrderManifest")).toBeInTheDocument());
       const row = c.getByText("OrderManifest").closest("tr") as HTMLElement;
-      await userEvent.click(within(row).getByText("Trigger"));
+      await userEvent.click(within(row).getByText("Queue"));
       await waitFor(() => expect(c.getByText("OrderManifest")).toBeInTheDocument());
     } finally {
       restore();
@@ -214,7 +214,7 @@ export const HideAdminTrains: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByText("OrderManifest")).toBeInTheDocument());
-    const toggle = c.getByRole("checkbox", { name: "Hide admin trains" });
+    const toggle = c.getByRole("checkbox", { name: "Hide scheduler trains" });
     expect(toggle).toBeChecked();
     expect(c.queryByText("IManifestManagerTrain")).not.toBeInTheDocument();
     await userEvent.click(toggle);
@@ -234,11 +234,11 @@ export const TriggerSelected: Story = {
       await waitFor(() => expect(c.getByText("OrderManifest")).toBeInTheDocument());
       await userEvent.click(c.getByLabelText("Select #801"));
       await userEvent.click(c.getByLabelText("Select #802"));
-      await userEvent.click(c.getByRole("button", { name: "Trigger selected" }));
+      await userEvent.click(c.getByRole("button", { name: "Queue selected" }));
       expect(await c.findByText("2 queued across 2 of 2 manifest(s).")).toBeInTheDocument();
       await waitFor(() => expect(c.queryByText(/selected$/)).not.toBeInTheDocument());
       await userEvent.click(c.getByLabelText("Select #801"));
-      await userEvent.click(c.getByRole("button", { name: "Trigger selected" }));
+      await userEvent.click(c.getByRole("button", { name: "Queue selected" }));
       expect(
         await c.findByText("0 queued, 1 already queued (that entry now runs as the trigger) across 1 of 1 manifest(s)."),
       ).toBeInTheDocument();
@@ -257,7 +257,7 @@ export const TriggerSelectedAskAfresh: Story = {
     try {
       await waitFor(() => expect(c.getByText("OrderManifest")).toBeInTheDocument());
       await userEvent.click(c.getByLabelText("Select #803"));
-      await userEvent.click(c.getByRole("button", { name: "Trigger selected, ask afresh" }));
+      await userEvent.click(c.getByRole("button", { name: "Queue selected, ask afresh" }));
       expect(await c.findByText("1 queued across 1 of 1 manifest(s), asking afresh.")).toBeInTheDocument();
     } finally {
       restore();
@@ -269,16 +269,15 @@ export const TriggerSelectedAskAfresh: Story = {
 export const TriggerSelectedDeclined: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
-    const original = window.confirm;
-    window.confirm = () => false;
+    setAutoConfirm(false);
     try {
       await waitFor(() => expect(c.getByText("OrderManifest")).toBeInTheDocument());
       await userEvent.click(c.getByLabelText("Select #801"));
-      await userEvent.click(c.getByRole("button", { name: "Trigger selected" }));
+      await userEvent.click(c.getByRole("button", { name: "Queue selected" }));
       expect(c.getByText("1 selected")).toBeInTheDocument();
       expect(c.queryByText(/queued across/)).not.toBeInTheDocument();
     } finally {
-      window.confirm = original;
+      setAutoConfirm(null);
     }
   },
 };
@@ -293,7 +292,7 @@ export const TriggerSelectedNotes: Story = {
       await waitFor(() => expect(c.getByText("RetiredManifest")).toBeInTheDocument());
       await userEvent.click(c.getByLabelText("Select #801"));
       await userEvent.click(c.getByLabelText("Select #1000001"));
-      await userEvent.click(c.getByRole("button", { name: "Trigger selected" }));
+      await userEvent.click(c.getByRole("button", { name: "Queue selected" }));
       expect(await c.findByRole("alert")).toHaveTextContent("Manifest 1000001 not found.");
       expect(c.getByText("1 queued, 1 not found across 1 of 2 manifest(s).")).toBeInTheDocument();
     } finally {
@@ -331,7 +330,7 @@ export const TriggerSelectedRefused: Story = {
     try {
       await waitFor(() => expect(c.getByText("OrderManifest")).toBeInTheDocument());
       await userEvent.click(c.getByLabelText("Select #801"));
-      await userEvent.click(c.getByRole("button", { name: "Trigger selected" }));
+      await userEvent.click(c.getByRole("button", { name: "Queue selected" }));
       expect(await c.findByRole("alert")).toHaveTextContent("At most 1000 ids can be sent at once.");
       expect(c.getByText("1 selected")).toBeInTheDocument();
     } finally {

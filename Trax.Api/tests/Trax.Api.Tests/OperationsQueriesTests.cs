@@ -28,6 +28,7 @@ using Trax.Mediator.Services.TrainDiscovery;
 using Trax.Mediator.Services.TrainExecution;
 using Trax.Scheduler.Configuration;
 using Trax.Scheduler.Services.Operations;
+using HostHeartbeat = Trax.Effect.Models.HostHeartbeat.HostHeartbeat;
 
 namespace Trax.Api.Tests;
 
@@ -100,7 +101,7 @@ public class OperationsQueriesTests
         await using var db = await _factory.CreateDbContextAsync(default);
         var ctx = (Microsoft.EntityFrameworkCore.DbContext)db;
         await ctx.Database.ExecuteSqlRawAsync(
-            "TRUNCATE TABLE trax.dead_letter, trax.metadata, trax.manifest, trax.manifest_group RESTART IDENTITY CASCADE"
+            "TRUNCATE TABLE trax.dead_letter, trax.metadata, trax.manifest, trax.manifest_group, trax.host_heartbeat RESTART IDENTITY CASCADE"
         );
     }
 
@@ -319,6 +320,232 @@ public class OperationsQueriesTests
         detail.Output.Should().Be("{\"result\": \"ok\"}");
         detail.StackTrace.Should().Be("at Foo() line 1");
         detail.CurrentlyRunningJunction.Should().Be("ChargeCard");
+    }
+
+    [Test]
+    public async Task GetExecutionDetail_LinksItsWorkQueueEntry_AndTheDeadLetterItRetries()
+    {
+        var manifest = await SeedManifestForDeadLetter();
+        long retry,
+            plain,
+            entryId,
+            deadLetterId;
+        await using (var db = await _factory.CreateDbContextAsync(default))
+        {
+            var deadLetter = DeadLetter.Create(
+                new CreateDeadLetter
+                {
+                    Manifest = manifest,
+                    Reason = "retries used up",
+                    RetryCount = 3,
+                }
+            );
+            await db.Track(deadLetter);
+            var run = Metadata.Create(
+                new CreateMetadata
+                {
+                    Name = "Trax.X.RetryTrain",
+                    ExternalId = Guid.NewGuid().ToString("N"),
+                    Input = null,
+                }
+            );
+            var other = Metadata.Create(
+                new CreateMetadata
+                {
+                    Name = "Trax.X.RetryTrain",
+                    ExternalId = Guid.NewGuid().ToString("N"),
+                    Input = null,
+                }
+            );
+            await db.Track(run);
+            await db.Track(other);
+            await db.SaveChanges(default);
+
+            // The requeue's entry, dispatched as the retry run; the dead letter names that run.
+            var entry = Trax.Effect.Models.WorkQueue.WorkQueue.Create(
+                new Trax.Effect.Models.WorkQueue.DTOs.CreateWorkQueue
+                {
+                    TrainName = "Trax.X.RetryTrain",
+                }
+            );
+            entry.MetadataId = run.Id;
+            entry.Status = WorkQueueStatus.Dispatched;
+            await db.Track(entry);
+            deadLetter.RetryMetadataId = run.Id;
+            await db.SaveChanges(default);
+
+            (retry, plain, entryId, deadLetterId) = (run.Id, other.Id, entry.Id, deadLetter.Id);
+        }
+
+        var detail = await new OperationsQueries().GetExecutionDetail(retry, _factory, default);
+        detail!.WorkQueueEntryId.Should().Be(entryId);
+        detail.DeadLetterId.Should().Be(deadLetterId);
+        detail.InvokedBy.Should().BeNull();
+
+        var unlinked = await new OperationsQueries().GetExecutionDetail(plain, _factory, default);
+        unlinked!.WorkQueueEntryId.Should().BeNull();
+        unlinked.DeadLetterId.Should().BeNull();
+        unlinked.ChildCount.Should().Be(0);
+    }
+
+    [Test]
+    public async Task Lookup_ARunsExternalId_FindsThatRun()
+    {
+        var externalId = Guid.NewGuid().ToString("N");
+        long id;
+        await using (var db = await _factory.CreateDbContextAsync(default))
+        {
+            var run = Metadata.Create(
+                new CreateMetadata
+                {
+                    Name = "Trax.X.LookupTrain",
+                    ExternalId = externalId,
+                    Input = null,
+                }
+            );
+            await db.Track(run);
+            await db.SaveChanges(default);
+            id = run.Id;
+        }
+
+        var matches = await new OperationsQueries().GetLookup(
+            $"  {externalId} ",
+            Operations,
+            default
+        );
+
+        matches
+            .Should()
+            .ContainSingle()
+            .Which.Should()
+            .BeEquivalentTo(
+                new LookupMatch(
+                    LookupKind.Run,
+                    id.ToString(),
+                    "Trax.X.LookupTrain · Pending",
+                    "externalId"
+                )
+            );
+        (await new OperationsQueries().GetLookup(externalId[..10], Operations, default))
+            .Should()
+            .BeEmpty("a lookup matches exactly, never a prefix");
+    }
+
+    [Test]
+    public async Task Lookup_ANumber_FindsEveryKindWithThatId_AndASubjectKeyItsEntries()
+    {
+        var manifest = await SeedManifestForDeadLetter();
+        var subject = "customer-" + Guid.NewGuid().ToString("N");
+        long entryId;
+        await using (var db = await _factory.CreateDbContextAsync(default))
+        {
+            var run = Metadata.Create(
+                new CreateMetadata
+                {
+                    Name = "Trax.X.LookupTrain",
+                    ExternalId = Guid.NewGuid().ToString("N"),
+                    Input = null,
+                }
+            );
+            await db.Track(run);
+            await db.Track(
+                DeadLetter.Create(
+                    new CreateDeadLetter
+                    {
+                        Manifest = manifest,
+                        Reason = "retries used up",
+                        RetryCount = 3,
+                    }
+                )
+            );
+            var entry = Trax.Effect.Models.WorkQueue.WorkQueue.Create(
+                new Trax.Effect.Models.WorkQueue.DTOs.CreateWorkQueue
+                {
+                    TrainName = "Trax.X.LookupTrain",
+                    SubjectKey = subject,
+                }
+            );
+            await db.Track(entry);
+            await db.SaveChanges(default);
+            entryId = entry.Id;
+        }
+
+        // Every table was emptied, so id 1 is the first row of each.
+        var byId = await new OperationsQueries().GetLookup("1", Operations, default);
+        byId.Select(m => (m.Kind, m.Id, m.MatchedOn))
+            .Should()
+            .BeEquivalentTo(
+                new[]
+                {
+                    (LookupKind.Run, "1", "id"),
+                    (LookupKind.Manifest, "1", "id"),
+                    (LookupKind.WorkQueueEntry, "1", "id"),
+                    (LookupKind.DeadLetter, "1", "id"),
+                }
+            );
+
+        var bySubject = await new OperationsQueries().GetLookup(subject, Operations, default);
+        bySubject
+            .Should()
+            .ContainSingle()
+            .Which.Should()
+            .Match<LookupMatch>(m =>
+                m.Kind == LookupKind.WorkQueueEntry
+                && m.Id == entryId.ToString()
+                && m.MatchedOn == "subjectKey"
+            );
+
+        var byName = await new OperationsQueries().GetLookup(manifest.Name, Operations, default);
+        byName.Should().Contain(m => m.Kind == LookupKind.Manifest && m.MatchedOn == "name");
+    }
+
+    [Test]
+    public async Task Lookup_AnInstanceGuid_NamesTheRow_NeverItsContextOrOwner()
+    {
+        var id = Guid.NewGuid();
+        var secret = "secret-" + Guid.NewGuid().ToString("N");
+        var userKey = "user-" + Guid.NewGuid().ToString("N");
+        long rowId;
+        await using (var db = await _factory.CreateDbContextAsync(default))
+        {
+            var draft = new Trax.Effect.Models.SnapshotDraft.SnapshotDraft
+            {
+                Id = id,
+                OwnerKind = SnapshotOwnerKind.User,
+                UserKey = userKey,
+                Machine = "topic-map",
+                Version = 1,
+                State = "Building",
+                Context = JsonSerializer.Serialize(new { apiKey = secret }),
+                ConcurrencyToken = Guid.NewGuid(),
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            };
+            db.SnapshotDrafts.Add(draft);
+            await db.SaveChanges(default);
+            rowId = draft.RowId;
+        }
+
+        var matches = await new OperationsQueries().GetLookup(id.ToString(), Operations, default);
+
+        var match = matches.Should().ContainSingle().Which;
+        match
+            .Should()
+            .BeEquivalentTo(
+                new LookupMatch(
+                    LookupKind.MachineInstance,
+                    id.ToString(),
+                    "topic-map · Building",
+                    "id"
+                )
+                {
+                    Machine = "topic-map",
+                    OwnerKind = SnapshotOwnerKind.User,
+                    RowId = rowId,
+                }
+            );
+        var json = JsonSerializer.Serialize(matches);
+        json.Should().NotContain(userKey).And.NotContain(secret);
     }
 
     [Test]
@@ -586,76 +813,386 @@ public class OperationsQueriesTests
         names.Should().Contain(n => n.EndsWith("IJobDispatcherTrain"));
     }
 
-    [Test]
-    public async Task GetHosts_RollsUpByInstance_WithRunningAndTotalCounts()
+    private static readonly DateTimeOffset HostsNow = new(2026, 10, 18, 12, 0, 0, TimeSpan.Zero);
+
+    private async Task SeedHeartbeat(
+        string instance,
+        string name,
+        DateTimeOffset lastBeat,
+        bool runsDispatcher = false,
+        int? workerSlots = null,
+        int? workerSlotsInUse = null
+    )
     {
-        await using (var db = await _factory.CreateDbContextAsync(default))
-        {
-            // inst-1: two runs, one still in progress. inst-2: a single completed run.
-            async Task Seed(string instance, string name, string env, TrainState state)
+        await using var db = await _factory.CreateDbContextAsync(default);
+        db.HostHeartbeats.Add(
+            new HostHeartbeat
             {
-                var m = Metadata.Create(
-                    new CreateMetadata
-                    {
-                        Name = "Trax.X.HostTrain",
-                        ExternalId = Guid.NewGuid().ToString("N"),
-                        Input = null,
-                    }
-                );
-                m.HostInstanceId = instance;
-                m.HostName = name;
-                m.HostEnvironment = env;
-                m.TrainState = state;
-                await db.Track(m);
+                InstanceId = instance,
+                HostName = name,
+                HostEnvironment = "kubernetes",
+                TraxVersion = "1.70.0",
+                StartedAt = (lastBeat - TimeSpan.FromHours(1)).UtcDateTime,
+                LastHeartbeatAt = lastBeat.UtcDateTime,
+                RunsDispatcher = runsDispatcher,
+                RunsManifestManager = runsDispatcher,
+                WorkerSlots = workerSlots,
+                WorkerSlotsInUse = workerSlotsInUse,
             }
+        );
+        await db.SaveChanges(default);
+    }
 
-            await Seed("inst-1", "host-1", "Production", TrainState.Completed);
-            await Seed("inst-1", "host-1", "Production", TrainState.InProgress);
-            await Seed("inst-2", "host-2", "Development", TrainState.Completed);
-            await db.SaveChanges(default);
-        }
-
-        var hosts = await new OperationsQueries().GetHosts(_factory, default);
-
-        hosts.Should().HaveCount(2);
-        var one = hosts.Single(h => h.InstanceId == "inst-1");
-        one.Name.Should().Be("host-1");
-        one.Environment.Should().Be("Production");
-        one.TotalExecutions.Should().Be(2);
-        one.CurrentlyRunning.Should().Be(1);
-        var two = hosts.Single(h => h.InstanceId == "inst-2");
-        two.TotalExecutions.Should().Be(1);
-        two.CurrentlyRunning.Should().Be(0);
+    private async Task SeedRun(string? instance, TrainState state)
+    {
+        await using var db = await _factory.CreateDbContextAsync(default);
+        var m = Metadata.Create(
+            new CreateMetadata
+            {
+                Name = "Trax.X.HostTrain",
+                ExternalId = Guid.NewGuid().ToString("N"),
+                Input = null,
+            }
+        );
+        m.HostInstanceId = instance;
+        m.TrainState = state;
+        await db.Track(m);
+        await db.SaveChanges(default);
     }
 
     [Test]
-    public async Task GetHosts_IgnoresRowsWithoutAHostInstance()
+    public async Task GetHosts_ReadsTheHeartbeatTable_WithOnlineAndRunsInProgress()
     {
+        // pod-a beat 10 seconds ago and runs the scheduler with four workers, three busy. pod-b
+        // last beat a minute ago, so it has missed more than three beats.
+        await SeedHeartbeat(
+            "pod-a",
+            "host-a",
+            HostsNow - TimeSpan.FromSeconds(10),
+            runsDispatcher: true,
+            workerSlots: 4,
+            workerSlotsInUse: 3
+        );
+        await SeedHeartbeat("pod-b", "host-b", HostsNow - TimeSpan.FromMinutes(1));
+        await SeedRun("pod-a", TrainState.InProgress);
+        await SeedRun("pod-a", TrainState.InProgress);
+        await SeedRun("pod-a", TrainState.Completed);
+        await SeedRun("pod-b", TrainState.Completed);
+        await SeedRun("gone", TrainState.InProgress);
+
+        var hosts = await new OperationsQueries().GetHosts(
+            _factory,
+            default,
+            new ManualTime(HostsNow)
+        );
+
+        hosts.Select(h => h.InstanceId).Should().Equal(new[] { "pod-a", "pod-b" }, "online first");
+        var a = hosts[0];
+        a.Online.Should().BeTrue();
+        a.Name.Should().Be("host-a");
+        a.Environment.Should().Be("kubernetes");
+        a.TraxVersion.Should().Be("1.70.0");
+        a.LastHeartbeat.Should().Be((HostsNow - TimeSpan.FromSeconds(10)).UtcDateTime);
+        a.StartedAt.Kind.Should().Be(DateTimeKind.Utc);
+        a.RunsDispatcher.Should().BeTrue();
+        a.RunsManifestManager.Should().BeTrue();
+        a.WorkerSlots.Should().Be(4);
+        a.WorkerSlotsInUse.Should().Be(3);
+        a.CurrentlyRunning.Should().Be(2, "only runs still in progress count");
+        var b = hosts[1];
+        b.Online.Should().BeFalse("its last beat is a minute old");
+        b.RunsDispatcher.Should().BeFalse();
+        b.WorkerSlots.Should().BeNull();
+        b.CurrentlyRunning.Should().Be(0);
+    }
+
+    [Test]
+    public async Task GetHosts_MarksAHostOffline_AfterThreeMissedBeats()
+    {
+        var lastBeat = HostsNow;
+        await SeedHeartbeat("pod-a", "host-a", lastBeat);
+
+        async Task<bool> OnlineAt(TimeSpan later) =>
+            (
+                await new OperationsQueries().GetHosts(
+                    _factory,
+                    default,
+                    new ManualTime(lastBeat + later)
+                )
+            )
+                .Single()
+                .Online;
+
+        (await OnlineAt(TimeSpan.FromSeconds(15))).Should().BeTrue("one missed beat");
+        (await OnlineAt(TimeSpan.FromSeconds(44))).Should().BeTrue("two missed beats");
+        (await OnlineAt(TimeSpan.FromSeconds(45)))
+            .Should()
+            .BeFalse("three missed beats, 45 seconds, is offline");
+    }
+
+    [Test]
+    public async Task GetHosts_ListsNoHost_ThatHasNotBeaten_EvenWhenItsRunsAreRecorded()
+    {
+        // A host that predates the heartbeat, or one that stopped more than a day ago and was
+        // pruned, has runs but no row: it is not up, so it is not listed.
+        await SeedRun("old-host", TrainState.Completed);
+        await SeedRun(null, TrainState.InProgress);
+
+        var hosts = await new OperationsQueries().GetHosts(
+            _factory,
+            default,
+            new ManualTime(HostsNow)
+        );
+
+        hosts.Should().BeEmpty();
+    }
+
+    [Test]
+    public async Task GetAttention_ListsAPausedDispatcher_AndOneGroupOfTwoDeadLettersSharingAReason()
+    {
+        // The job dispatcher is switched off the way the console switches it, and two manifests
+        // of one train are dead-lettered for the same reason, a third for another.
+        var ops = Operations;
+        (
+            await ops.UpdateSchedulerConfigAsync(
+                new UpdateSchedulerConfigInput(JobDispatcherEnabled: false),
+                default
+            )
+        )
+            .Success.Should()
+            .BeTrue();
+        try
+        {
+            var groupId = await SeedManifestGroup("attention-group");
+            async Task<Manifest> SeedManifest()
+            {
+                await using var db = await _factory.CreateDbContextAsync(default);
+                var m = Manifest.Create(new CreateManifest { Name = typeof(SomeFakeTrain) });
+                m.ManifestGroupId = groupId;
+                await db.Track(m);
+                await db.SaveChanges(default);
+                return m;
+            }
+            var first = await SeedManifest();
+            var second = await SeedManifest();
+            var third = await SeedManifest();
+            await using (var db = await _factory.CreateDbContextAsync(default))
+            {
+                foreach (
+                    var (manifest, reason) in new[]
+                    {
+                        (first, "Max retries exceeded"),
+                        (second, "Max retries exceeded"),
+                        (third, "Timed out"),
+                    }
+                )
+                    await db.Track(
+                        DeadLetter.Create(
+                            new CreateDeadLetter
+                            {
+                                Manifest = manifest,
+                                Reason = reason,
+                                RetryCount = 3,
+                            }
+                        )
+                    );
+                await db.SaveChanges(default);
+            }
+
+            var attention = await new OperationsQueries().GetAttention(ops, default);
+
+            attention.Scheduler.JobDispatcherEnabled.Should().BeFalse();
+            attention.Scheduler.ManifestManagerEnabled.Should().BeTrue();
+            attention.Scheduler.Paused.Should().BeTrue();
+            attention.Scheduler.Link.Should().Be("/system/scheduler");
+
+            var train = typeof(SomeFakeTrain).FullName!;
+            attention
+                .DeadLetters.Select(g => (g.TrainName, g.Reason, g.Count))
+                .Should()
+                .Equal((train, "Max retries exceeded", 2L), (train, "Timed out", 1L));
+            attention
+                .DeadLetters[0]
+                .Link.Should()
+                .Be(
+                    "/runs/dead-letters?status=AWAITING_INTERVENTION&train="
+                        + Uri.EscapeDataString(train)
+                        + "&reason=Max%20retries%20exceeded"
+                );
+        }
+        finally
+        {
+            await using var db = await _factory.CreateDbContextAsync(default);
+            await ((DbContext)db).Database.ExecuteSqlRawAsync("DELETE FROM trax.scheduler_config");
+        }
+    }
+
+    [Test]
+    public async Task GetAttention_ListsATrainFailingMoreThisHourThanThisWeek_AndNotOneThatAlwaysFails()
+    {
+        var now = DateTime.UtcNow;
         await using (var db = await _factory.CreateDbContextAsync(default))
         {
-            for (var i = 0; i < 3; i++)
+            void Run(string name, TrainState state, DateTime start)
             {
                 var m = Metadata.Create(
                     new CreateMetadata
                     {
-                        Name = $"Trax.X.NoHost{i}",
+                        Name = name,
                         ExternalId = Guid.NewGuid().ToString("N"),
                         Input = null,
                     }
                 );
-                // Metadata.Create stamps the running process's host by default; clear it so this
-                // row represents pre-host-tracking data that the rollup must skip.
-                m.HostInstanceId = null;
-                m.HostName = null;
-                m.HostEnvironment = null;
-                await db.Track(m);
+                m.TrainState = state;
+                m.StartTime = start;
+                m.EndTime = start.AddSeconds(1);
+                db.Metadatas.Add(m);
             }
+
+            // Flaky: one failure in three this hour, none in the four runs earlier in the week.
+            Run("Trax.X.Flaky", TrainState.Failed, now.AddMinutes(-10));
+            Run("Trax.X.Flaky", TrainState.Completed, now.AddMinutes(-20));
+            Run("Trax.X.Flaky", TrainState.Completed, now.AddMinutes(-30));
+            for (var i = 0; i < 4; i++)
+                Run("Trax.X.Flaky", TrainState.Completed, now.AddDays(-2).AddHours(i));
+            // Broken: fails every time, this hour and before.
+            Run("Trax.X.Broken", TrainState.Failed, now.AddMinutes(-5));
+            Run("Trax.X.Broken", TrainState.Failed, now.AddDays(-3));
+            // New: its first run, this hour, failed.
+            Run("Trax.X.New", TrainState.Failed, now.AddMinutes(-1));
+            // Old: failed this often eight days ago, outside the week.
+            Run("Trax.X.Old", TrainState.Completed, now.AddMinutes(-15));
+            Run("Trax.X.Old", TrainState.Failed, now.AddDays(-8));
             await db.SaveChanges(default);
         }
 
-        var hosts = await new OperationsQueries().GetHosts(_factory, default);
+        var attention = await new OperationsQueries().GetAttention(Operations, default);
 
-        hosts.Should().BeEmpty();
+        attention.Scheduler.Paused.Should().BeFalse();
+        attention
+            .FailingTrains.Select(t => t.TrainName)
+            .Should()
+            .Equal("Trax.X.New", "Trax.X.Flaky");
+        var flaky = attention.FailingTrains[1];
+        flaky.FailedLastHour.Should().Be(1);
+        flaky.FinishedLastHour.Should().Be(3);
+        flaky.LastHourFailureRate.Should().BeApproximately(1.0 / 3, 1e-9);
+        flaky.BaselineFailureRate.Should().Be(0);
+        flaky.Link.Should().Be("/runs?state=FAILED&train=Trax.X.Flaky");
+    }
+
+    [Test]
+    public async Task GetAttention_CountsTheDueBacklog_StuckInstancesAndOfflineHosts()
+    {
+        await using (var db = await _factory.CreateDbContextAsync(default))
+        {
+            var ctx = (DbContext)db;
+            await ctx.Database.ExecuteSqlRawAsync(
+                "TRUNCATE TABLE trax.work_queue, trax.snapshot_draft RESTART IDENTITY CASCADE"
+            );
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        await SeedHeartbeat("pod-up", "host-up", now - TimeSpan.FromSeconds(5));
+        await SeedHeartbeat("pod-gone", "host-gone", now - TimeSpan.FromMinutes(10), true);
+
+        await using (var db = await _factory.CreateDbContextAsync(default))
+        {
+            var oldest = Trax.Effect.Models.WorkQueue.WorkQueue.Create(
+                new Trax.Effect.Models.WorkQueue.DTOs.CreateWorkQueue { TrainName = "Trax.X.Q" }
+            );
+            oldest.CreatedAt = now.UtcDateTime.AddMinutes(-7);
+            var newer = Trax.Effect.Models.WorkQueue.WorkQueue.Create(
+                new Trax.Effect.Models.WorkQueue.DTOs.CreateWorkQueue { TrainName = "Trax.X.Q" }
+            );
+            var later = Trax.Effect.Models.WorkQueue.WorkQueue.Create(
+                new Trax.Effect.Models.WorkQueue.DTOs.CreateWorkQueue { TrainName = "Trax.X.Q" }
+            );
+            later.ScheduledAt = now.UtcDateTime.AddHours(1);
+            later.CreatedAt = now.UtcDateTime.AddHours(-1);
+            db.WorkQueues.AddRange(oldest, newer, later);
+
+            // Two runs machine instances wait on: one failed ten minutes ago, one completed.
+            Metadata Ran(TrainState state)
+            {
+                var m = Metadata.Create(
+                    new CreateMetadata
+                    {
+                        Name = "Trax.X.Invoked",
+                        ExternalId = Guid.NewGuid().ToString("N"),
+                        Input = null,
+                    }
+                );
+                m.TrainState = state;
+                m.EndTime = now.UtcDateTime.AddMinutes(-10);
+                db.Metadatas.Add(m);
+                return m;
+            }
+            var failedRun = Ran(TrainState.Failed);
+            var completedRun = Ran(TrainState.Completed);
+
+            Trax.Effect.Models.SnapshotDraft.SnapshotDraft Instance(
+                string state,
+                DateTimeOffset? due,
+                string? token = null
+            ) =>
+                new()
+                {
+                    Id = Guid.NewGuid(),
+                    OwnerKind = SnapshotOwnerKind.System,
+                    Machine = "order",
+                    Version = 1,
+                    State = state,
+                    Context = "{}",
+                    ConcurrencyToken = Guid.NewGuid(),
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    DueAt = due,
+                    InvokeToken = token,
+                };
+            db.SnapshotDrafts.AddRange(
+                Instance("Waiting", now - TimeSpan.FromMinutes(5)),
+                Instance("Waiting", now - TimeSpan.FromMinutes(6)),
+                Instance("Waiting", now + TimeSpan.FromMinutes(5)),
+                Instance("Shipped", null),
+                Instance("Charging", null, failedRun.ExternalId),
+                Instance("Charging", null, completedRun.ExternalId)
+            );
+            await db.SaveChanges(default);
+        }
+
+        var attention = await new OperationsQueries().GetAttention(Operations, default);
+
+        attention.Queue.Queued.Should().Be(2, "the entry scheduled for later is not due");
+        attention.Queue.OldestAgeSeconds.Should().BeInRange(7 * 60 - 5, 7 * 60 + 60);
+        attention.Queue.Link.Should().Be("/runs/queued?status=QUEUED");
+
+        attention
+            .StuckInstances.Select(g => (g.Machine, g.State, g.Count, g.Link))
+            .Should()
+            .Equal(
+                ("order", "Waiting", 2L, "/machines/order?state=Waiting&stuck=true"),
+                ("order", "Charging", 1L, "/machines/order?state=Charging&stuck=true")
+            );
+
+        attention
+            .OfflineHosts.Should()
+            .ContainSingle()
+            .Which.Should()
+            .BeEquivalentTo(
+                new
+                {
+                    InstanceId = "pod-gone",
+                    HostName = "host-gone",
+                    RunsDispatcher = true,
+                    Link = "/system/hosts",
+                }
+            );
+    }
+
+    private sealed class ManualTime(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     [Test]
@@ -2011,6 +2548,23 @@ public class OperationsQueriesTests
 
         fetched.Should().NotBeNull();
         fetched!.Id.Should().Be(first.Id);
+    }
+
+    [Test]
+    public async Task GetDeadLetters_NameTheManifestByItsExternalId()
+    {
+        // The console groups dead letters by train and reason and names the manifests in each
+        // group; manifestName is the train, so the manifest's own name has to come with the row.
+        var manifest = await SeedManifestForDeadLetter();
+        await SeedDeadLetters(1, manifest);
+        var queries = new DeadLetterQueries();
+
+        var listed = (await queries.GetDeadLetters(_factory, default)).Items.Single();
+        var read = await queries.GetDeadLetter(listed.Id, _factory, default);
+
+        listed.ManifestExternalId.Should().Be(manifest.ExternalId);
+        listed.ManifestName.Should().Be(manifest.Name);
+        read!.ManifestExternalId.Should().Be(manifest.ExternalId);
     }
 
     [Test]

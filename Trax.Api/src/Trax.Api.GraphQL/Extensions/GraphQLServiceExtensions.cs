@@ -34,6 +34,7 @@ using Trax.Api.GraphQL.Subscriptions;
 using Trax.Api.GraphQL.TypeModules;
 using Trax.Api.GraphQL.Types;
 using Trax.Api.GraphQL.Validation;
+using Trax.Api.Services.BulkOperations;
 using Trax.Effect.Attributes;
 using Trax.Effect.Configuration.TraxBuilder;
 using Trax.Effect.Services.ChangeSignal;
@@ -203,6 +204,10 @@ public static class GraphQLServiceExtensions
         // dashboard's Requeue All and this surface share it. See
         // docs/adr/0036-requeue-all-runs-in-the-background-and-returns-a-handle.md.
         services.TryAddSingleton<IDeadLetterRequeueJobs, DeadLetterRequeueJobs>();
+        // startBulkOperation runs its batches in this node's list, in the background, stopped only
+        // by the host shutting down. See
+        // docs/adr/0045-a-bulk-operation-applies-to-a-confirmed-snapshot-of-a-filter.md.
+        services.TryAddSingleton<BulkOperationJobs>();
         services.AddTransient<GraphQLSubscriptionHook>();
         services
             .AddSingleton<LifecycleHookFactory<GraphQLSubscriptionHook>>()
@@ -356,8 +361,15 @@ public static class GraphQLServiceExtensions
             graphqlBuilder.AddType(new ObjectType<MetricsQueries>());
             graphqlBuilder.AddType(new ObjectType<ConfigQueries>());
             graphqlBuilder.AddType<RunGraphType>();
+            graphqlBuilder.AddType<TrainInfoType>();
+            // When each manifest runs next, batched per request.
+            services.AddDataLoader<ManifestUpcomingRunsLoader>();
+            graphqlBuilder.AddTypeExtension(ManifestScheduleFields.Summary());
+            graphqlBuilder.AddTypeExtension(ManifestScheduleFields.Detail());
             // The operator's live feed of state-machine instances, behind the operations gate.
             graphqlBuilder.AddTypeExtension(MachineInstanceFeed.Extension());
+            // An instance's history, a field of the instance its lookup returns.
+            graphqlBuilder.AddTypeExtension(MachineInstanceTransitionsField.Extension());
             graphqlBuilder.AddTypeExtension(
                 new ObjectTypeExtension(d =>
                 {

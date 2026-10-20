@@ -2,13 +2,14 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import { ManifestDetailPage } from "./ManifestDetailPage";
 import { manifestDetailScenario } from "../mock/scenarios";
+import { setAutoConfirm } from "../lib/confirm";
 
 const meta = {
   title: "Pages/Manifest detail",
   component: ManifestDetailPage,
   parameters: {
-    routePath: "/manifests/:id",
-    route: "/manifests/801",
+    routePath: "/schedules/:id",
+    route: "/schedules/801",
     mock: manifestDetailScenario,
   },
 } satisfies Meta<typeof ManifestDetailPage>;
@@ -17,25 +18,65 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 function acceptConfirm() {
-  const original = window.confirm;
-  window.confirm = () => true;
+  setAutoConfirm(true);
   return () => {
-    window.confirm = original;
+    setAutoConfirm(null);
   };
 }
 
 export const Mock: Story = {};
 
-export const Real: Story = { parameters: { real: true, route: "/manifests/5000" } };
+export const Real: Story = { parameters: { real: true, route: "/schedules/5000" } };
 
-// Disable an enabled manifest -> badge flips to Disabled.
+// The switch beside the heading disables an enabled manifest after the console asks, and the
+// badge flips to Disabled; it enables again without asking.
 export const EnableDisable: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
-    await waitFor(() => expect(c.getByRole("heading", { name: "OrderManifest" })).toBeInTheDocument());
-    expect(c.getByText("Enabled")).toBeInTheDocument();
-    await userEvent.click(c.getByText("Disable"));
-    await waitFor(() => expect(c.getByText("Disabled")).toBeInTheDocument());
+    const restore = acceptConfirm();
+    try {
+      await waitFor(() => expect(c.getByRole("heading", { name: "OrderManifest" })).toBeInTheDocument());
+      expect(c.getByText("Enabled")).toBeInTheDocument();
+      await userEvent.click(c.getByRole("switch", { name: "Manifest enabled" }));
+      await waitFor(() => expect(c.getByText("Disabled")).toBeInTheDocument());
+      expect(c.getByRole("switch", { name: "Manifest enabled" })).not.toBeChecked();
+      await userEvent.click(c.getByRole("switch", { name: "Manifest enabled" }));
+      await waitFor(() => expect(c.getByText("Enabled")).toBeInTheDocument());
+    } finally {
+      restore();
+    }
+  },
+};
+
+// Declining the question leaves the manifest enabled.
+export const DisableDeclined: Story = {
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    setAutoConfirm(false);
+    try {
+      await waitFor(() => expect(c.getByRole("heading", { name: "OrderManifest" })).toBeInTheDocument());
+      await userEvent.click(c.getByRole("switch", { name: "Manifest enabled" }));
+      expect(c.getByText("Enabled")).toBeInTheDocument();
+      expect(c.getByRole("switch", { name: "Manifest enabled" })).toBeChecked();
+    } finally {
+      setAutoConfirm(null);
+    }
+  },
+};
+
+// When it runs: the schedule in words, the next runs, and the run history by window.
+export const ScheduleAndHistory: Story = {
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    const schedule = await c.findByRole("region", { name: "Schedule" });
+    expect(within(schedule).getByText("Every 5 minutes")).toBeInTheDocument();
+    expect(within(schedule).getAllByRole("listitem")).toHaveLength(5);
+    const history = await c.findByRole("region", { name: "Run history" });
+    await waitFor(() => expect(within(history).getByText(/completed/)).toBeInTheDocument());
+    await userEvent.click(within(history).getByRole("button", { name: "7 days" }));
+    await waitFor(() =>
+      expect(within(history).getByRole("button", { name: "7 days" })).toHaveAttribute("aria-pressed", "true"),
+    );
   },
 };
 
@@ -66,8 +107,8 @@ export const Richness: Story = {
     await waitFor(() => expect(c.getByText("Exclusion windows")).toBeInTheDocument());
     expect(c.getByText(/Skips Saturday, Sunday/)).toBeInTheDocument();
     expect(c.getByText(/Skips daily 02:00:00 to 04:00:00/)).toBeInTheDocument();
-    // Recent executions (manifest-scoped history).
-    await waitFor(() => expect(c.getByText("Recent executions")).toBeInTheDocument());
+    // Recent runs (manifest-scoped history).
+    await waitFor(() => expect(c.getByText("Recent runs")).toBeInTheDocument());
     await waitFor(() => expect(c.getByText("#950")).toBeInTheDocument());
   },
 };
@@ -79,7 +120,7 @@ export const Trigger: Story = {
     const restore = acceptConfirm();
     try {
       await waitFor(() => expect(c.getByRole("heading", { name: "OrderManifest" })).toBeInTheDocument());
-      await userEvent.click(c.getByText("Trigger"));
+      await userEvent.click(c.getByText("Queue now"));
       await waitFor(() => expect(c.getByRole("heading", { name: "OrderManifest" })).toBeInTheDocument());
     } finally {
       restore();
@@ -97,7 +138,7 @@ export const DetailFields: Story = {
     expect(c.getByText("Misfire threshold (s)").nextElementSibling).toHaveTextContent("60");
     expect(c.getByText("Variance (s)").nextElementSibling).toHaveTextContent("15");
     expect(c.getByText("Next scheduled run").nextElementSibling).not.toHaveTextContent("—");
-    expect(c.getByRole("link", { name: "alpha-group" })).toHaveAttribute("href", "/groups/1");
+    expect(c.getByRole("link", { name: "alpha-group" })).toHaveAttribute("href", "/schedules/groups/1");
     expect(c.getByText("Properties (OrderInput)")).toBeInTheDocument();
     expect(c.getByText(/"apiKey": "\[REDACTED\]"/)).toBeInTheDocument();
   },
@@ -105,11 +146,11 @@ export const DetailFields: Story = {
 
 // A dependent manifest links the manifest it depends on.
 export const DependsOnLink: Story = {
-  parameters: { route: "/manifests/803" },
+  parameters: { route: "/schedules/803" },
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     await waitFor(() => expect(c.getByRole("heading", { name: "ReportManifest" })).toBeInTheDocument());
-    expect(c.getByRole("link", { name: "#801" })).toHaveAttribute("href", "/manifests/801");
+    expect(c.getByRole("link", { name: "#801" })).toHaveAttribute("href", "/schedules/801");
     expect(c.queryByText(/Properties/)).not.toBeInTheDocument(); // no properties
   },
 };
@@ -137,7 +178,7 @@ export const TriggerAskAfresh: Story = {
     const restore = acceptConfirm();
     try {
       await waitFor(() => expect(c.getByRole("heading", { name: "OrderManifest" })).toBeInTheDocument());
-      await userEvent.click(c.getByText("Trigger, ask afresh"));
+      await userEvent.click(c.getByText("Queue now, ask afresh"));
       expect(await c.findByText(/a released retry asks afresh/)).toBeInTheDocument();
     } finally {
       restore();
@@ -148,7 +189,7 @@ export const TriggerAskAfresh: Story = {
 // A manifest the server does not have shows the not-found state.
 export const NotFound: Story = {
   parameters: {
-    route: "/manifests/9999",
+    route: "/schedules/9999",
     mock: { resolvers: () => ({ OperationsQueries: { manifestDetail: () => null } }) },
   },
   play: async ({ canvasElement }) => {

@@ -407,7 +407,7 @@ never matches.
 
 `071_snapshot_draft_operator_listing.sql` (SQLite `033`) serves the operator's list of state-machine
 instances (the API's [`machineInstances`](/docs/sdk-reference/graphql-api/queries/machine-instances#machineinstances)
-and the dashboard's [State Machines page](/docs/dashboard/pages#state-machines)), which reads newest first
+and the console's [Machines pages](/docs/dashboard/machines)), which reads newest first
 by `updated_at`. It adds the nullable `trax.snapshot_draft.created_at`, which the store writes when it
 creates a row; a row created before the migration, or by a host still on the previous version, reads
 it as null, since nothing recorded when it began. It replaces the `(machine, state)` index with
@@ -657,3 +657,64 @@ parent's child and the reconciler's sweep of children that ended; on Postgres it
 Nothing is backfilled: no instance spawned another before this migration. A host on the previous version neither
 spawns nor reads the column, so during a rolling deploy a parent it moves out of a spawning state leaves the child,
 and a child's end is delivered only by an upgraded host. Finish the deploy before machines that spawn are entered.
+
+## State-machine instance by id (086, SQLite 045)
+
+`086_snapshot_draft_id_index.sql` (SQLite `045`) adds `ix_snapshot_draft_id` on `trax.snapshot_draft (id)`, so an
+instance can be found by its id alone, across machines and owners. The operator's lookup of an id of unknown kind
+([`lookup`](/docs/sdk-reference/graphql-api/queries/operations#lookup)) reads it; the other keys on the table lead with
+the machine or the user. On Postgres it is built `CONCURRENTLY`, so drafts keep being saved while it builds. Nothing
+changes for a host on the previous version.
+
+## Host heartbeat (087, SQLite 046)
+
+`087_host_heartbeat.sql` (SQLite `046`) creates `trax.host_heartbeat`, `HostHeartbeat` on the model and
+`IDataContext.HostHeartbeats`: one row per running host process, keyed by `instance_id`, the
+`TraxHostInfo.HostInstanceId` stamped on each run. Its columns are `host_name`, `host_environment`, `trax_version`,
+`started_at`, `last_heartbeat_at`, `runs_dispatcher`, `runs_manifest_manager`, `worker_slots` and
+`worker_slots_in_use`, with an index, `ix_host_heartbeat_last_heartbeat_at`, on the last beat.
+
+Every host with a data provider (`UsePostgres`, `UseSqlite` or `UseInMemory`) now runs a background service that
+rewrites its row when it starts and every 15 seconds after, whether or not it has work, and deletes every row whose
+last beat is a day old. A failed beat is logged and retried at the next one; it never stops the host. A host started
+with `SkipMigrations()` against a database without the table logs one warning and shows as offline.
+
+[`operations.hosts`](/docs/sdk-reference/graphql-api/queries/operations#hosts) reads this table instead of grouping
+the run history, and calls a host offline once its last beat is 45 seconds old. A host on the previous version
+writes no row, so during a rolling deploy it is not listed until it is upgraded. Nothing is backfilled.
+
+## Run chain hash (088, SQLite 047)
+
+`088_metadata_chain_hash.sql` (SQLite `047`) adds a nullable `chain_hash` (`text`) to `trax.metadata`: the hash of
+the train's declared chain when the run started, the same hash a checkpoint row stores. A run records it when the
+host has already read the train's chain, which the startup chain check does for every registered train; a host that
+skips the check records none. [`runGraph`](/docs/sdk-reference/graphql-api/queries/executions#rungraph) compares it
+with the chain the host declares now and answers `chainChanged` when they differ, because the graph is always drawn
+on the current chain and a run whose node ids still match a changed one would otherwise look as if it ran that way.
+
+Nothing is backfilled: a run from before this migration, or from a host on the previous version during a rolling
+deploy, has no hash, and its graph is drawn with nothing to compare it to.
+
+## State-machine instance history (089, SQLite 048)
+
+`089_snapshot_transition.sql` (SQLite `048`) adds `trax.snapshot_transition`, `SnapshotTransition` on the model and
+`IDataContext.SnapshotTransitions`: one row for every snapshot of a state-machine instance the store writes, in the
+same transaction as the write. Each row holds the instance's row (`draft_row_id`), the `revision` the write gave it,
+its `kind` (`start`, `command`, `save`, `timer` or `outcome`, the Postgres enum `trax.snapshot_transition_kind`;
+an integer on SQLite), the command's name (`trigger`), the `actor` (`owner`, `host` or `machine`, the enum
+`trax.snapshot_transition_actor`), `from_state` and `to_state`, `occurred_at`, and the server-only `invoke_token` of
+the run or child the write started. It holds no context and no owner key. The operator reads it as
+[`machineInstance { transitions }`](/docs/sdk-reference/graphql-api/queries/machine-instances#transitions).
+
+An `AFTER DELETE` trigger on `trax.snapshot_draft`, `snapshot_draft_history` (statement-level on Postgres, per row
+on SQLite), deletes an instance's history with it, whoever deletes it: a discard, the expiry sweep or host code. It is
+a trigger rather than a foreign key because a foreign key would depend on `pk_snapshot_draft`, which 051 drops and
+rebuilds when it runs again. `TRUNCATE` fires no delete trigger, so truncate both tables together.
+`uq_snapshot_transition_draft_revision` on `(draft_row_id, revision)` holds one row per revision and serves both the
+trigger's delete and the newest-first read. A write
+that leaves the snapshot alone (a pending effect's mark, a run's token) adds no row, and neither does a writer that goes
+around the store, so revisions can skip.
+
+The table is new and starts empty: an instance's history begins with its first write after the upgrade. A host on the
+previous version writes snapshots without history, so during a rolling deploy the rows it writes are missing from the
+history of the instances it moves.
