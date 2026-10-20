@@ -5,6 +5,8 @@ type: tutorial
 area: general
 parent: The Trax book
 nav_order: 16
+redirect_from:
+  - /docs/samples/auth
 ---
 
 # 6. Customers and staff
@@ -31,3 +33,7 @@ This chapter starts from the end of [chapter 5](/docs/book/does-this-order-look-
 ## SDK Reference
 
 > [AddTraxJwtAuth](/docs/sdk-reference/api-auth/add-trax-jwt-auth) | [TraxAuthorize](/docs/sdk-reference/attributes/trax-authorize) | [TraxPrincipal](/docs/security/inject-the-current-principal) | [ITrainExecutionService](/docs/sdk-reference/mediator-api/i-train-execution-service) | [Scope a data context to the caller](/docs/effect/scope-a-data-context-to-the-caller) | [Effect data testing](/docs/sdk-reference/testing/effect-data-testing)
+
+---
+
+Next: [6.1 Fail closed](/docs/book/customers-and-staff/fail-closed)
