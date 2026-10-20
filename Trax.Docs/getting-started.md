@@ -13,6 +13,8 @@ snippet_context: none
 In this tutorial we build one application from an empty folder: a train that greets someone, run
 in-process first, then recorded in Postgres, scheduled, and called over GraphQL and watched from the
 operations console. Each step shows every file it changes in full, and what you should see when you run it.
+The [Glossary](/docs/reference/glossary) says what each Trax name means in plain terms: a train is a
+workflow, a junction one of its steps.
 
 Every C# block on this page is compiled in CI against the package versions in the project file below.
 
@@ -503,7 +505,7 @@ serves it over GraphQL and shows it in the operations console.
 
 - [Put a sign-in in front of the console](/docs/dashboard/add-the-console-to-a-host) before it runs
   outside Development.
-- [Secure a GraphQL host](/docs/api-security) with real credentials, and expose a train as a
+- [Secure a GraphQL host](/docs/security/secure-a-graphql-host) with real credentials, and expose a train as a
   mutation with [TraxMutation](/docs/sdk-reference/graphql-api/trax-graphql-attribute).
 - [Start from a project template](/docs/reference/templates): `trax-hub` scaffolds this same shape
   with a test project.
